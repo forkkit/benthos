@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/parser"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/query"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
+	"github.com/Jeffail/benthos/v3/lib/types"
 )
 
 // MappingFieldSpec is a field spec that describes a Bloblang mapping for
@@ -21,7 +22,7 @@ func MappingFieldSpec() docs.FieldSpec {
 		`if ![ "count", "error", "latency" ].contains(this) { deleted() }`,
 	}
 	summary := "An optional [Bloblang mapping](/docs/guides/bloblang/about) that allows you to rename or prevent certain metrics paths from being exported."
-	return docs.FieldCommon("metrics_mapping", summary, examples...).Linter(docs.LintBloblangMapping)
+	return docs.FieldBloblang("metrics_mapping", summary, examples...).HasDefault("")
 }
 
 // Mapping is a compiled Bloblang mapping used to rewrite metrics.
@@ -31,11 +32,11 @@ type Mapping struct {
 }
 
 // NewMapping parses a Bloblang mapping and returns a metrics mapping.
-func NewMapping(mapping string, logger log.Modular) (*Mapping, error) {
+func NewMapping(mgr types.Manager, mapping string, logger log.Modular) (*Mapping, error) {
 	if mapping == "" {
 		return &Mapping{m: nil, logger: logger}, nil
 	}
-	m, err := bloblang.NewMapping("", mapping)
+	m, err := interop.NewBloblangMapping(mgr, mapping)
 	if err != nil {
 		if perr, ok := err.(*parser.Error); ok {
 			return nil, fmt.Errorf("%v", perr.ErrorAtPosition([]rune(mapping)))
@@ -69,7 +70,7 @@ func (m *Mapping) mapPath(path string, labelNames, labelValues []string) (outPat
 
 	var v interface{} = query.Nothing(nil)
 	if err := m.m.ExecOnto(query.FunctionContext{
-		Maps:     map[string]query.Function{},
+		Maps:     m.m.Maps(),
 		Vars:     vars,
 		MsgBatch: msg,
 		NewMsg:   outPart,

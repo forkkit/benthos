@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -75,7 +74,7 @@ func TestHTTPClientSendBasic(t *testing.T) {
 			resultChan <- msg
 		}()
 
-		b, err := ioutil.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 
 		msg.Append(message.NewPart(b))
@@ -103,6 +102,31 @@ func TestHTTPClientSendBasic(t *testing.T) {
 			t.Fatal("Action timed out")
 		}
 	}
+}
+
+func TestHTTPClientBadContentType(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+
+		_, err = w.Write(bytes.ToUpper(b))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(ts.Close)
+
+	conf := client.NewConfig()
+	conf.URL = ts.URL + "/testpost"
+
+	h, err := NewClient(conf)
+	require.NoError(t, err)
+
+	testMsg := message.New([][]byte{[]byte("hello world")})
+
+	res, err := h.Send(context.Background(), testMsg, testMsg)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, res.Len())
+	assert.Equal(t, "HELLO WORLD", string(res.Get(0).Get()))
 }
 
 func TestHTTPClientDropOn(t *testing.T) {
@@ -164,7 +188,7 @@ func TestHTTPClientSendInterpolate(t *testing.T) {
 			resultChan <- msg
 		}()
 
-		b, err := ioutil.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 
 		msg.Append(message.NewPart(b))
@@ -219,13 +243,13 @@ func TestHTTPClientSendMultipart(t *testing.T) {
 				}
 				require.NoError(t, err)
 
-				msgBytes, err := ioutil.ReadAll(p)
+				msgBytes, err := io.ReadAll(p)
 				require.NoError(t, err)
 
 				msg.Append(message.NewPart(msgBytes))
 			}
 		} else {
-			b, err := ioutil.ReadAll(r.Body)
+			b, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 
 			msg.Append(message.NewPart(b))
@@ -320,6 +344,82 @@ func TestHTTPClientReceiveHeaders(t *testing.T) {
 		assert.Equal(t, testStr+"PART-A", string(resMsg.Get(0).Get()))
 		assert.Equal(t, "baz-0", resMsg.Get(0).Metadata().Get("foo-bar"))
 		assert.Equal(t, "201", resMsg.Get(0).Metadata().Get("http_status_code"))
+	}
+}
+
+func TestHTTPClientReceiveHeadersWithMetadataFiltering(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("foobar", "baz")
+		w.Header().Set("extra", "val")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	conf := client.NewConfig()
+	conf.URL = ts.URL
+
+	for _, tt := range []struct {
+		name                string
+		noExtraMetadata     bool
+		copyResponseHeaders bool
+		includePrefixes     []string
+		includePatterns     []string
+	}{
+		{
+			name:            "no extra metadata",
+			noExtraMetadata: true,
+		},
+		{
+			name:                "copy_response_headers only",
+			copyResponseHeaders: true,
+		},
+		{
+			name:            "include_prefixes only",
+			includePrefixes: []string{"foo"},
+		},
+		{
+			name:            "include_patterns only",
+			includePatterns: []string{".*bar"},
+		},
+		{
+			name:                "both copy_response_headers and include_prefixes",
+			copyResponseHeaders: true,
+			includePrefixes:     []string{"foo"},
+		},
+	} {
+		conf.CopyResponseHeaders = tt.copyResponseHeaders
+		conf.ExtractMetadata.IncludePrefixes = tt.includePrefixes
+		conf.ExtractMetadata.IncludePatterns = tt.includePatterns
+		h, err := NewClient(conf)
+		if err != nil {
+			t.Fatalf("%s: %s", tt.name, err)
+		}
+
+		resMsg, err := h.Send(context.Background(), nil, nil)
+		if err != nil {
+			t.Fatalf("%s: %s", tt.name, err)
+		}
+
+		metadataCount := 0
+		resMsg.Get(0).Metadata().Iter(func(_, _ string) error { metadataCount++; return nil })
+
+		if tt.noExtraMetadata {
+			if metadataCount > 1 {
+				t.Errorf("%s: wrong number of metadata items: %d", tt.name, metadataCount)
+			}
+			if exp, act := "", resMsg.Get(0).Metadata().Get("foobar"); exp != act {
+				t.Errorf("%s: wrong metadata value: %v != %v", tt.name, act, exp)
+			}
+		} else if exp, act := "baz", resMsg.Get(0).Metadata().Get("foobar"); exp != act {
+			t.Errorf("%s: wrong metadata value: %v != %v", tt.name, act, exp)
+		} else if tt.copyResponseHeaders && h.metaFilter.IsSet() {
+			if metadataCount < 3 {
+				t.Errorf("%s: wrong number of metadata items: %d", tt.name, metadataCount)
+			}
+			if exp, act := "val", resMsg.Get(0).Metadata().Get("extra"); exp != act {
+				t.Errorf("%s: wrong metadata value: %v != %v", tt.name, act, exp)
+			}
+		}
 	}
 }
 

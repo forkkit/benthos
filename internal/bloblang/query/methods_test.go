@@ -34,7 +34,7 @@ func TestMethods(t *testing.T) {
 	}
 	function := func(name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitFunction(name, args...)
+		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -59,7 +59,7 @@ func TestMethods(t *testing.T) {
 		t.Helper()
 		for _, m := range methods {
 			var err error
-			fn, err = InitMethod(m.name, fn, m.args...)
+			fn, err = InitMethodHelper(m.name, fn, m.args...)
 			require.NoError(t, err)
 		}
 		return fn
@@ -1145,6 +1145,41 @@ func TestMethods(t *testing.T) {
 			),
 			err: `string literal: failed to parse value as JSON: invalid character 'o' in literal null (expecting 'u')`,
 		},
+		"check parse duration ISO-8601": {
+			input: methods(
+				literalFn("P3Y6M4DT12H30M5.3S"),
+				method("parse_duration_iso8601"),
+			),
+			output: int64(110839937300000000),
+		},
+		"check parse duration ISO-8601 ignore more than one decimal place": {
+			input: methods(
+				literalFn("P3Y6M4DT12H30M5.33S"),
+				method("parse_duration_iso8601"),
+			),
+			output: int64(110839937300000000),
+		},
+		"check parse duration ISO-8601 only allow fractions in the last field": {
+			input: methods(
+				literalFn("P2.5YT7.5S"),
+				method("parse_duration_iso8601"),
+			),
+			err: "string literal: P2.5YT7.5S: 'Y' & 'S' only the last field can have a fraction",
+		},
+		"check parse duration ISO-8601 with invalid format": {
+			input: methods(
+				literalFn("P3S"),
+				method("parse_duration_iso8601"),
+			),
+			err: "string literal: P3S: 'S' designator cannot occur here",
+		},
+		"check parse duration ISO-8601 with bogus format": {
+			input: methods(
+				literalFn("gibberish"),
+				method("parse_duration_iso8601"),
+			),
+			err: "string literal: gibberish: expected 'P' period mark at the start",
+		},
 		"check parse timestamp unix": {
 			input: methods(
 				literalFn("2020-08-14T11:45:26.371Z"),
@@ -1341,6 +1376,22 @@ func TestMethods(t *testing.T) {
 				method("contains", "foo"),
 			),
 			messages: []easyMsg{{content: `["nope","bar"]`}},
+			output:   false,
+		},
+		"check contains array nums": {
+			input: methods(
+				function("json"),
+				method("contains", int64(10)),
+			),
+			messages: []easyMsg{{content: `["nope",10.0,3]`}},
+			output:   true,
+		},
+		"check contains array nums 2": {
+			input: methods(
+				function("json"),
+				method("contains", int64(10)),
+			),
+			messages: []easyMsg{{content: `["nope",3]`}},
 			output:   false,
 		},
 		"check contains map": {
@@ -2046,13 +2097,13 @@ func TestMethods(t *testing.T) {
 func TestMethodTargets(t *testing.T) {
 	function := func(name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitFunction(name, args...)
+		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
 	method := func(fn Function, name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitMethod(name, fn, args...)
+		fn, err := InitMethodHelper(name, fn, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -2114,7 +2165,7 @@ func TestMethodNoArgsTargets(t *testing.T) {
 	for k := range AllMethods.constructors {
 		// Only tests methods that do not need arguments, we need manual checks
 		// for other methods.
-		m, err := InitMethod(k, fn)
+		m, err := InitMethodHelper(k, fn)
 		if err != nil {
 			continue
 		}

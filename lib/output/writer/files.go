@@ -3,13 +3,12 @@ package writer
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -43,12 +42,24 @@ type Files struct {
 }
 
 // NewFiles creates a new file based writer.Type.
+//
+// Deprecated: use the V2 API instead.
 func NewFiles(
 	conf FilesConfig,
 	log log.Modular,
 	stats metrics.Type,
 ) (*Files, error) {
-	path, err := bloblang.NewField(conf.Path)
+	return NewFilesV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewFilesV2 creates a new file based writer.Type.
+func NewFilesV2(
+	conf FilesConfig,
+	mgr types.Manager,
+	log log.Modular,
+	stats metrics.Type,
+) (*Files, error) {
+	path, err := interop.NewBloblangField(mgr, conf.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse path expression: %v", err)
 	}
@@ -81,12 +92,12 @@ func (f *Files) Write(msg types.Message) error {
 	return IterateBatchedSend(msg, func(i int, p types.Part) error {
 		path := f.path.String(i, msg)
 
-		err := os.MkdirAll(filepath.Dir(path), os.FileMode(0777))
+		err := os.MkdirAll(filepath.Dir(path), os.FileMode(0o777))
 		if err != nil {
 			return err
 		}
 
-		return ioutil.WriteFile(path, p.Get(), os.FileMode(0666))
+		return os.WriteFile(path, p.Get(), os.FileMode(0o666))
 	})
 }
 

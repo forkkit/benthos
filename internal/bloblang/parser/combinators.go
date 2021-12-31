@@ -91,6 +91,31 @@ func InSet(set ...rune) Func {
 	}
 }
 
+// NotInSet parses any number of characters until a rune within a given set is
+// encountered.
+func NotInSet(set ...rune) Func {
+	setMap := make(map[rune]struct{}, len(set))
+	for _, r := range set {
+		setMap[r] = struct{}{}
+	}
+	exp := fmt.Sprintf("not chars(%v)", string(set))
+	return func(input []rune) Result {
+		if len(input) == 0 {
+			return Fail(NewError(input, exp), input)
+		}
+		i := 0
+		for ; i < len(input); i++ {
+			if _, exists := setMap[input[i]]; exists {
+				if i == 0 {
+					return Fail(NewError(input, exp), input)
+				}
+				break
+			}
+		}
+		return Success(string(input[:i]), input[i:])
+	}
+}
+
 // InRange parses any number of characters between two runes inclusive.
 func InRange(lower, upper rune) Func {
 	exp := fmt.Sprintf("range(%c - %c)", lower, upper)
@@ -399,15 +424,43 @@ func QuotedString() Func {
 	}
 }
 
+// EmptyLine ensures that a line is empty, but doesn't advance the parser beyond
+// the newline char.
+func EmptyLine() Func {
+	return func(r []rune) Result {
+		if len(r) > 0 && r[0] == '\n' {
+			return Success(nil, r)
+		}
+		return Fail(NewError(r, "Empty line"), r)
+	}
+}
+
+// EndOfInput ensures that the input is now empty.
+func EndOfInput() Func {
+	return func(r []rune) Result {
+		if len(r) == 0 {
+			return Success(nil, r)
+		}
+		return Fail(NewError(r, "End of input"), r)
+	}
+}
+
 // Newline parses a line break.
 func Newline() Func {
-	return Expect(Char('\n'), "line break")
+	return Expect(
+		JoinStringPayloads(
+			Sequence(
+				Optional(Char('\r')),
+				Char('\n'),
+			),
+		),
+		"line break")
 }
 
 // NewlineAllowComment parses an optional comment followed by a mandatory line
 // break.
 func NewlineAllowComment() Func {
-	return Expect(OneOf(Comment(), Char('\n')), "line break")
+	return Expect(OneOf(Comment(), Newline()), "line break")
 }
 
 // UntilFail applies a parser until it fails, and returns a slice containing all

@@ -52,10 +52,13 @@ type ConstructorFunc func(bool, Config, types.Manager, log.Modular, metrics.Type
 
 // WalkConstructors iterates each component constructor.
 func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
+	inferred := docs.ComponentFieldsFromConf(NewConfig())
 	for k, v := range Constructors {
 		conf := v.config
 		if len(v.FieldSpecs) > 0 {
-			conf = docs.FieldComponent().WithChildren(v.FieldSpecs...)
+			conf = docs.FieldComponent().WithChildren(v.FieldSpecs.DefaultAndTypeFrom(inferred[k])...)
+		} else {
+			conf.Children = conf.Children.DefaultAndTypeFrom(inferred[k])
 		}
 		spec := docs.ComponentSpec{
 			Type:        docs.TypeInput,
@@ -74,7 +77,7 @@ func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
 				spec.Categories = append(spec.Categories, string(cat))
 			}
 		}
-		fn(ConstructorFunc(v.constructor), spec)
+		fn(v.constructor, spec)
 	}
 	for k, v := range pluginSpecs {
 		spec := docs.ComponentSpec{
@@ -84,7 +87,7 @@ func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
 			Plugin: true,
 			Config: docs.FieldComponent().Unlinted(),
 		}
-		fn(ConstructorFunc(v.constructor), spec)
+		fn(v.constructor, spec)
 	}
 }
 
@@ -198,6 +201,8 @@ var Constructors = map[string]TypeSpec{}
 //------------------------------------------------------------------------------
 
 // String constants representing each input type.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 const (
 	TypeAMQP              = "amqp"
 	TypeAMQP09            = "amqp_0_9"
@@ -254,6 +259,8 @@ const (
 //------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all input types.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 type Config struct {
 	Label             string                       `json:"label" yaml:"label"`
 	Type              string                       `json:"type" yaml:"type"`
@@ -312,6 +319,8 @@ type Config struct {
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 func NewConfig() Config {
 	return Config{
 		Label:             "",
@@ -414,12 +423,12 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var spec docs.ComponentSpec
-	if aliased.Type, spec, err = docs.GetInferenceCandidateFromNode(docs.TypeInput, aliased.Type, value); err != nil {
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(nil, docs.TypeInput, aliased.Type, value); err != nil {
 		return fmt.Errorf("line %v: %w", value.Line, err)
 	}
 
 	if spec.Plugin {
-		pluginNode, err := docs.GetPluginConfigNode(aliased.Type, value)
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
 		if err != nil {
 			return fmt.Errorf("line %v: %v", value.Line, err)
 		}

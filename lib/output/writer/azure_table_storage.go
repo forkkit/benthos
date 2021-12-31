@@ -1,3 +1,4 @@
+//go:build !wasm
 // +build !wasm
 
 package writer
@@ -11,8 +12,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/storage"
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -35,8 +36,20 @@ type AzureTableStorage struct {
 }
 
 // NewAzureTableStorage creates a new Azure Table Storage writer Type.
+//
+// Deprecated: use the V2 API instead.
 func NewAzureTableStorage(
 	conf AzureTableStorageConfig,
+	log log.Modular,
+	stats metrics.Type,
+) (*AzureTableStorage, error) {
+	return NewAzureTableStorageV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewAzureTableStorageV2 creates a new Azure Table Storage writer Type.
+func NewAzureTableStorageV2(
+	conf AzureTableStorageConfig,
+	mgr types.Manager,
 	log log.Modular,
 	stats metrics.Type,
 ) (*AzureTableStorage, error) {
@@ -70,18 +83,18 @@ func NewAzureTableStorage(
 		timeout: timeout,
 		client:  client.GetTableService(),
 	}
-	if a.tableName, err = bloblang.NewField(conf.TableName); err != nil {
+	if a.tableName, err = interop.NewBloblangField(mgr, conf.TableName); err != nil {
 		return nil, fmt.Errorf("failed to parse table name expression: %v", err)
 	}
-	if a.partitionKey, err = bloblang.NewField(conf.PartitionKey); err != nil {
+	if a.partitionKey, err = interop.NewBloblangField(mgr, conf.PartitionKey); err != nil {
 		return nil, fmt.Errorf("failed to parse partition key expression: %v", err)
 	}
-	if a.rowKey, err = bloblang.NewField(conf.RowKey); err != nil {
+	if a.rowKey, err = interop.NewBloblangField(mgr, conf.RowKey); err != nil {
 		return nil, fmt.Errorf("failed to parse row key expression: %v", err)
 	}
 	a.properties = make(map[string]*field.Expression)
 	for property, value := range conf.Properties {
-		if a.properties[property], err = bloblang.NewField(value); err != nil {
+		if a.properties[property], err = interop.NewBloblangField(mgr, value); err != nil {
 			return nil, fmt.Errorf("failed to parse property expression: %v", err)
 		}
 	}
@@ -107,37 +120,13 @@ func (a *AzureTableStorage) Write(msg types.Message) error {
 // WriteWithContext attempts to write message contents to a target storage account as files.
 func (a *AzureTableStorage) WriteWithContext(wctx context.Context, msg types.Message) error {
 	writeReqs := make(map[string]map[string][]*storage.Entity)
-
 	if err := IterateBatchedSend(msg, func(i int, p types.Part) error {
 		entity := &storage.Entity{}
 		tableName := a.tableName.String(i, msg)
 		partitionKey := a.partitionKey.String(i, msg)
 		entity.PartitionKey = a.partitionKey.String(i, msg)
 		entity.RowKey = a.rowKey.String(i, msg)
-
-		jsonMap := make(map[string]interface{})
-		if len(a.properties) == 0 {
-			err := json.Unmarshal(p.Get(), &jsonMap)
-			if err != nil {
-				a.log.Errorf("error unmarshalling message: %v.", err)
-			}
-			for property, v := range jsonMap {
-				switch v.(type) {
-				case []interface{}, map[string]interface{}:
-					m, err := json.Marshal(v)
-					if err != nil {
-						a.log.Errorf("error marshalling property: %v.", property)
-					}
-					jsonMap[property] = string(m)
-				}
-			}
-		} else {
-			for property, value := range a.properties {
-				jsonMap[property] = value.String(i, msg)
-			}
-		}
-		entity.Properties = jsonMap
-
+		entity.Properties = a.getProperties(i, p, msg)
 		if writeReqs[tableName] == nil {
 			writeReqs[tableName] = make(map[string][]*storage.Entity)
 		}
@@ -146,29 +135,50 @@ func (a *AzureTableStorage) WriteWithContext(wctx context.Context, msg types.Mes
 	}); err != nil {
 		return err
 	}
+	return a.writeBatches(writeReqs)
+}
 
+func (a *AzureTableStorage) getProperties(i int, p types.Part, msg types.Message) map[string]interface{} {
+	properties := make(map[string]interface{})
+	if len(a.properties) == 0 {
+		err := json.Unmarshal(p.Get(), &properties)
+		if err != nil {
+			a.log.Errorf("error unmarshalling message: %v.", err)
+		}
+		for property, v := range properties {
+			switch v.(type) {
+			case []interface{}, map[string]interface{}:
+				m, err := json.Marshal(v)
+				if err != nil {
+					a.log.Errorf("error marshaling property: %v.", property)
+				}
+				properties[property] = string(m)
+			}
+		}
+	} else {
+		for property, value := range a.properties {
+			properties[property] = value.String(i, msg)
+		}
+	}
+	return properties
+}
+
+func (a *AzureTableStorage) writeBatches(writeReqs map[string]map[string][]*storage.Entity) error {
 	for tn, pks := range writeReqs {
 		table := a.client.GetTableReference(tn)
 		for _, entities := range pks {
 			tableBatch := table.NewBatch()
-			for _, entity := range entities {
+			ne := len(entities)
+			for i, entity := range entities {
 				entity.Table = table
-				if err := a.createBatch(tableBatch, a.conf.InsertType, entity); err != nil {
+				if err := a.addToBatch(tableBatch, a.conf.InsertType, entity); err != nil {
 					return err
 				}
-			}
-			if err := tableBatch.ExecuteBatch(); err != nil {
-				if cerr, ok := err.(storage.AzureStorageServiceError); ok {
-					if cerr.Code == "TableNotFound" {
-						if cerr := table.Create(uint(10), storage.FullMetadata, nil); cerr != nil {
-							a.log.Errorf("error creating table: %v.", cerr)
-						}
-						// retry
-						err = tableBatch.ExecuteBatch()
+				if reachedBatchLimit(i) || isLastEntity(i, ne) {
+					if err := a.executeBatch(table, tableBatch); err != nil {
+						return err
 					}
-				}
-				if err != nil {
-					return err
+					tableBatch = table.NewBatch()
 				}
 			}
 		}
@@ -176,7 +186,36 @@ func (a *AzureTableStorage) WriteWithContext(wctx context.Context, msg types.Mes
 	return nil
 }
 
-func (a *AzureTableStorage) createBatch(tableBatch *storage.TableBatch, insertType string, entity *storage.Entity) error {
+func (a *AzureTableStorage) executeBatch(table *storage.Table, tableBatch *storage.TableBatch) error {
+	if err := tableBatch.ExecuteBatch(); err != nil {
+		if tableDoesNotExist(err) {
+			if cerr := table.Create(uint(10), storage.FullMetadata, nil); cerr != nil {
+				return cerr
+			}
+			err = tableBatch.ExecuteBatch()
+		}
+		return err
+	}
+	return nil
+}
+
+func tableDoesNotExist(err error) bool {
+	if cerr, ok := err.(storage.AzureStorageServiceError); ok {
+		return cerr.Code == "TableNotFound"
+	}
+	return false
+}
+
+func isLastEntity(i, ne int) bool {
+	return i+1 == ne
+}
+
+func reachedBatchLimit(i int) bool {
+	const batchSizeLimit = 100
+	return (i+1)%batchSizeLimit == 0
+}
+
+func (a *AzureTableStorage) addToBatch(tableBatch *storage.TableBatch, insertType string, entity *storage.Entity) error {
 	switch insertType {
 	case "INSERT":
 		tableBatch.InsertEntity(entity)

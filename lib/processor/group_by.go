@@ -6,19 +6,17 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/condition"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/google/go-cmp/cmp"
-	olog "github.com/opentracing/opentracing-go/log"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -66,14 +64,14 @@ output:
 			},
 		},
 		config: docs.FieldComponent().Array().WithChildren(
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"check",
 				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message belongs to a given group.",
 				`this.type == "foo"`,
 				`this.contents.urls.contains("https://benthos.dev/")`,
 				`true`,
-			).HasDefault("").Linter(docs.LintBloblangMapping),
-			docs.FieldDeprecated("condition").HasType(docs.FieldCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
+			).HasDefault(""),
+			docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
 				defaultBytes, err := yaml.Marshal(condition.NewConfig())
 				if err != nil {
 					return "", false
@@ -87,7 +85,7 @@ output:
 			docs.FieldCommon(
 				"processors",
 				"A list of [processors](/docs/components/processors/about/) to execute on the newly formed group.",
-			).HasDefault([]interface{}{}).Array().HasType(docs.FieldProcessor),
+			).HasDefault([]interface{}{}).Array().HasType(docs.FieldTypeProcessor),
 		),
 		UsesBatches: true,
 	}
@@ -163,7 +161,7 @@ func NewGroupBy(
 		}
 
 		if len(gConf.Check) > 0 {
-			if groups[i].Check, err = bloblang.NewMapping("", gConf.Check); err != nil {
+			if groups[i].Check, err = interop.NewBloblangMapping(mgr, gConf.Check); err != nil {
 				return nil, fmt.Errorf("failed to parse check for group '%v': %v", i, err)
 			}
 		}
@@ -226,9 +224,9 @@ func (g *GroupBy) ProcessMessage(msg types.Message) ([]types.Message, types.Resp
 			if group.Condition != nil {
 				if group.Condition.Check(message.Lock(msg, i)) {
 					groupStr := strconv.Itoa(j)
-					spans[i].LogFields(
-						olog.String("event", "grouped"),
-						olog.String("type", groupStr),
+					spans[i].LogKV(
+						"event", "grouped",
+						"type", groupStr,
 					)
 					spans[i].SetTag("group", groupStr)
 					groups[j].Append(p.Copy())
@@ -243,9 +241,9 @@ func (g *GroupBy) ProcessMessage(msg types.Message) ([]types.Message, types.Resp
 				}
 				if res {
 					groupStr := strconv.Itoa(j)
-					spans[i].LogFields(
-						olog.String("event", "grouped"),
-						olog.String("type", groupStr),
+					spans[i].LogKV(
+						"event", "grouped",
+						"type", groupStr,
 					)
 					spans[i].SetTag("group", groupStr)
 					groups[j].Append(p.Copy())
@@ -255,9 +253,9 @@ func (g *GroupBy) ProcessMessage(msg types.Message) ([]types.Message, types.Resp
 			}
 		}
 
-		spans[i].LogFields(
-			olog.String("event", "grouped"),
-			olog.String("type", "default"),
+		spans[i].LogKV(
+			"event", "grouped",
+			"type", "default",
 		)
 		spans[i].SetTag("group", "default")
 		groupless.Append(p.Copy())

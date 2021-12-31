@@ -1,7 +1,6 @@
 package bundle
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
@@ -12,6 +11,24 @@ import (
 // AllRateLimits is a set containing every single ratelimit that has been imported.
 var AllRateLimits = &RateLimitSet{
 	specs: map[string]rateLimitSpec{},
+}
+
+//------------------------------------------------------------------------------
+
+// RateLimitAdd adds a new ratelimit to this environment by providing a
+// constructor and documentation.
+func (e *Environment) RateLimitAdd(constructor RateLimitConstructor, spec docs.ComponentSpec) error {
+	return e.rateLimits.Add(constructor, spec)
+}
+
+// RateLimitInit attempts to initialise a ratelimit from a config.
+func (e *Environment) RateLimitInit(conf ratelimit.Config, mgr NewManagement) (types.RateLimit, error) {
+	return e.rateLimits.Init(conf, mgr)
+}
+
+// RateLimitDocs returns a slice of ratelimit specs, which document each method.
+func (e *Environment) RateLimitDocs() []docs.ComponentSpec {
+	return e.rateLimits.Docs()
 }
 
 //------------------------------------------------------------------------------
@@ -34,9 +51,6 @@ type RateLimitSet struct {
 func (s *RateLimitSet) Add(constructor RateLimitConstructor, spec docs.ComponentSpec) error {
 	if s.specs == nil {
 		s.specs = map[string]rateLimitSpec{}
-	}
-	if _, exists := s.specs[spec.Name]; exists {
-		return fmt.Errorf("conflicting ratelimit name: %v", spec.Name)
 	}
 	s.specs[spec.Name] = rateLimitSpec{
 		constructor: constructor,

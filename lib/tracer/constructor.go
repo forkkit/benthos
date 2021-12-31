@@ -39,10 +39,13 @@ type ConstructorFunc func(Config, ...func(Type)) (Type, error)
 
 // WalkConstructors iterates each component constructor.
 func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
+	inferred := docs.ComponentFieldsFromConf(NewConfig())
 	for k, v := range Constructors {
 		conf := v.config
 		if len(v.FieldSpecs) > 0 {
-			conf = docs.FieldComponent().WithChildren(v.FieldSpecs...)
+			conf = docs.FieldComponent().WithChildren(v.FieldSpecs.DefaultAndTypeFrom(inferred[k])...)
+		} else {
+			conf.Children = conf.Children.DefaultAndTypeFrom(inferred[k])
 		}
 		spec := docs.ComponentSpec{
 			Type:        docs.TypeTracer,
@@ -132,7 +135,7 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("line %v: %v", value.Line, err)
 	}
 
-	if aliased.Type, _, err = docs.GetInferenceCandidateFromNode(docs.TypeTracer, aliased.Type, value); err != nil {
+	if aliased.Type, _, err = docs.GetInferenceCandidateFromYAML(nil, docs.TypeTracer, aliased.Type, value); err != nil {
 		return fmt.Errorf("line %v: %w", value.Line, err)
 	}
 
@@ -144,13 +147,13 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 
 var header = "This document was generated with `benthos --list-tracers`" + `
 
-A tracer type represents a destination for Benthos to send opentracing events to
+A tracer type represents a destination for Benthos to send tracing events to
 such as [Jaeger](https://www.jaegertracing.io/).
 
 When a tracer is configured all messages will be allocated a root span during
 ingestion that represents their journey through a Benthos pipeline. Many Benthos
-processors create spans, and so opentracing is a great way to analyse the
-pathways of individual messages as they progress through a Benthos instance.
+processors create spans, and so tracing is a great way to analyse the pathways
+of individual messages as they progress through a Benthos instance.
 
 Some inputs, such as ` + "`http_server` and `http_client`" + `, are capable of
 extracting a root span from the source of the message (HTTP headers). This is

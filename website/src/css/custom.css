@@ -53,6 +53,7 @@
   --ifm-heading-color: #000000;
   --ifm-hero-text-color: #000000;
   --ifm-blockquote-color: #3c3c3c;
+  --ifm-alert-color: #000000;
 
   --ifm-code-font-size: 95%;
 }
@@ -97,10 +98,6 @@ a > code {
 
 a.contents__link > code {
   color: var(--ifm-code-color);
-}
-
-html[data-theme="dark"] .admonition h5 {
-  color: var(--ifm-background-color);
 }
 
 .menu--responsive > button {

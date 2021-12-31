@@ -6,14 +6,13 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/query"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 )
@@ -21,7 +20,7 @@ import (
 //------------------------------------------------------------------------------
 
 var branchFields = docs.FieldSpecs{
-	docs.FieldCommon(
+	docs.FieldBloblang(
 		"request_map",
 		"A [Bloblang mapping](/docs/guides/bloblang/about) that describes how to create a request payload suitable for the child processors of this branch. If left empty then the branch will begin with an exact copy of the origin message (including metadata).",
 		`root = {
@@ -33,12 +32,12 @@ var branchFields = docs.FieldSpecs{
 } else {
 	deleted()
 }`,
-	).HasDefault("").Linter(docs.LintBloblangMapping),
+	).HasDefault(""),
 	docs.FieldCommon(
 		"processors",
 		"A list of processors to apply to mapped requests. When processing message batches the resulting batch must match the size and ordering of the input batch, therefore filtering, grouping should not be performed within these processors.",
-	).Array().HasType(docs.FieldProcessor).HasDefault([]interface{}{}),
-	docs.FieldCommon(
+	).Array().HasType(docs.FieldTypeProcessor).HasDefault([]interface{}{}),
+	docs.FieldBloblang(
 		"result_map",
 		"A [Bloblang mapping](/docs/guides/bloblang/about) that describes how the resulting messages from branched processing should be mapped back into the original payload. If left empty the origin message will remain unchanged (including metadata).",
 		`meta foo_code = meta("code")
@@ -52,7 +51,7 @@ root.bar.id = this.user.id`,
 } else {
 	this
 }`,
-	).HasDefault("").Linter(docs.LintBloblangMapping),
+	).HasDefault(""),
 }
 
 func init() {
@@ -99,7 +98,7 @@ branch messages.`,
 				Summary: `
 This example strips the request message into an empty body, grabs an HTTP
 payload, and places the result back into the original message at the path
-` + "`repo.status`" + `:`,
+` + "`image.pull_count`" + `:`,
 				Config: `
 pipeline:
   processors:
@@ -109,7 +108,10 @@ pipeline:
           - http:
               url: https://hub.docker.com/v2/repositories/jeffail/benthos
               verb: GET
-        result_map: root.repo.status = this
+        result_map: root.image.pull_count = this.pull_count
+
+# Example input:  {"id":"foo","some":"pre-existing data"}
+# Example output: {"id":"foo","some":"pre-existing data","image":{"pull_count":1234}}
 `,
 			},
 			{
@@ -127,6 +129,9 @@ pipeline:
               key: ${! content() }
               operator: get
         result_map: root.document.description = content().string()
+
+# Example input:  {"document":{"id":"foo","content":"hello world"}}
+# Example output: {"document":{"id":"foo","content":"hello world","description":"this is a cool doc"}}
 `,
 			},
 			{
@@ -143,6 +148,9 @@ pipeline:
         processors:
           - lambda:
               function: trigger_user_update
+
+# Example input: {"doc":{"id":"foo","body":"hello world"},"user":{"name":"fooey"}}
+# Output matches the input, which is unchanged
 `,
 			},
 			{
@@ -275,12 +283,12 @@ func newBranch(
 
 	var err error
 	if len(conf.RequestMap) > 0 {
-		if b.requestMap, err = bloblang.NewMapping("", conf.RequestMap); err != nil {
+		if b.requestMap, err = interop.NewBloblangMapping(mgr, conf.RequestMap); err != nil {
 			return nil, fmt.Errorf("failed to parse request mapping: %w", err)
 		}
 	}
 	if len(conf.ResultMap) > 0 {
-		if b.resultMap, err = bloblang.NewMapping("", conf.ResultMap); err != nil {
+		if b.resultMap, err = interop.NewBloblangMapping(mgr, conf.ResultMap); err != nil {
 			return nil, fmt.Errorf("failed to parse result mapping: %w", err)
 		}
 	}

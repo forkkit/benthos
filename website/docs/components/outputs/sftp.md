@@ -15,8 +15,9 @@ categories: ["Network"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Writes files to a server over SFTP.
 
 Introduced in version 3.39.0.
@@ -32,10 +33,32 @@ output:
     credentials:
       username: ""
       password: ""
+      private_key_file: ""
+      private_key_pass: ""
     max_in_flight: 1
 ```
 
 In order to have a different path for each object you should use function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
+
+## Batches and Mulipart Messages
+
+When writing multipart (batched) messages using the `lines` codec the last message ends with double delimiters. E.g. the messages "foo", "bar" and "baz" would be written as:
+
+```
+foo\n
+bar\n
+baz\n
+```
+
+Whereas a multipart message [ "foo", "bar", "baz" ] would be written as:
+
+```
+foo\n
+bar\n
+baz\n\n
+```
+
+This enables consumers of this output feed to reconstruct the original batches. However, if you wish to avoid this behaviour then add a [`split` processor](/docs/components/processors/split) before messages reach this output.
 
 ## Performance
 
@@ -105,6 +128,22 @@ Default: `""`
 ### `credentials.password`
 
 The password for the username to connect to the SFTP server.
+
+
+Type: `string`  
+Default: `""`  
+
+### `credentials.private_key_file`
+
+The private key for the username to connect to the SFTP server.
+
+
+Type: `string`  
+Default: `""`  
+
+### `credentials.private_key_pass`
+
+Optional passphrase for private key.
 
 
 Type: `string`  

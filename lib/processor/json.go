@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/Jeffail/gabs/v2"
-	"github.com/opentracing/opentracing-go"
 )
 
 //------------------------------------------------------------------------------
@@ -310,7 +310,7 @@ func foldNumberArray(children []*gabs.Container) (float64, error) {
 		case int64:
 			b += float64(t)
 		case float64:
-			b += float64(t)
+			b += t
 		case json.Number:
 			f, err := t.Float64()
 			if err != nil {
@@ -657,7 +657,7 @@ type JSON struct {
 func NewJSON(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	value, err := bloblang.NewField(string(conf.JSON.Value))
+	value, err := interop.NewBloblangField(mgr, string(conf.JSON.Value))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
 	}
@@ -697,7 +697,7 @@ func (p *JSON) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 	p.mCount.Incr(1)
 	newMsg := msg.Copy()
 
-	proc := func(index int, span opentracing.Span, part types.Part) error {
+	proc := func(index int, span *tracing.Span, part types.Part) error {
 		valueBytes := p.value.BytesEscapedLegacy(index, newMsg)
 		jsonPart, err := part.JSON()
 		if err == nil {
@@ -733,7 +733,7 @@ func (p *JSON) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		return nil
 	}
 
-	IteratePartsWithSpan(TypeJSON, p.parts, newMsg, proc)
+	IteratePartsWithSpanV2(TypeJSON, p.parts, newMsg, proc)
 
 	msgs := [1]types.Message{newMsg}
 

@@ -2,12 +2,13 @@ package input_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/lib/api"
 	"github.com/Jeffail/benthos/v3/lib/input"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/manager"
@@ -33,13 +35,15 @@ import (
 	_ "github.com/Jeffail/benthos/v3/public/components/all"
 )
 
-type apiRegMutWrapper struct {
+/*
+type apiRegGorillaMutWrapper struct {
 	mut *http.ServeMux
 }
 
-func (a apiRegMutWrapper) RegisterEndpoint(path, desc string, h http.HandlerFunc) {
+func (a apiRegGorillaMutWrapper) RegisterEndpoint(path, desc string, h http.HandlerFunc) {
 	a.mut.HandleFunc(path, h)
 }
+*/
 
 type apiRegGorillaMutWrapper struct {
 	mut *mux.Router
@@ -54,7 +58,7 @@ func TestHTTPBasic(t *testing.T) {
 
 	nTestLoops := 100
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +91,7 @@ func TestHTTPBasic(t *testing.T) {
 			} else if res.StatusCode != 200 {
 				t.Errorf("Wrong error code returned: %v", res.StatusCode)
 			}
-			resBytes, err := ioutil.ReadAll(res.Body)
+			resBytes, err := io.ReadAll(res.Body)
 			if err != nil {
 				t.Error(err)
 			}
@@ -181,7 +185,7 @@ func TestHTTPBasic(t *testing.T) {
 			} else if res.StatusCode != 200 {
 				t.Errorf("Wrong error code returned: %v", res.StatusCode)
 			}
-			resBytes, err := ioutil.ReadAll(res.Body)
+			resBytes, err := io.ReadAll(res.Body)
 			if err != nil {
 				t.Error(err)
 			}
@@ -211,13 +215,108 @@ func TestHTTPBasic(t *testing.T) {
 	h.CloseAsync()
 }
 
+func getFreePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
+	}
+
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+func TestHTTPServerLifecycle(t *testing.T) {
+	freePort, err := getFreePort()
+	require.NoError(t, err)
+
+	apiConf := api.NewConfig()
+	apiConf.Address = fmt.Sprintf("0.0.0.0:%v", freePort)
+	apiConf.Enabled = true
+
+	testURL := fmt.Sprintf("http://localhost:%v/foo/bar", freePort)
+
+	apiImpl, err := api.New("", "", apiConf, nil, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	go func() {
+		_ = apiImpl.ListenAndServe()
+	}()
+	defer apiImpl.Shutdown(context.Background())
+
+	mgr, err := manager.New(manager.NewConfig(), apiImpl, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	conf := input.NewConfig()
+	conf.HTTPServer.Path = "/foo/bar"
+
+	timeout := time.Second * 5
+	readNextMsg := func(in input.Type) (types.Message, error) {
+		t.Helper()
+		var tran types.Transaction
+		select {
+		case tran = <-in.TransactionChan():
+			select {
+			case tran.ResponseChan <- response.NewAck():
+			case <-time.After(timeout):
+				return nil, errors.New("timed out 1")
+			}
+		case <-time.After(timeout):
+			return nil, errors.New("timed out 2")
+		}
+		return tran.Payload, nil
+	}
+
+	server, err := input.NewHTTPServer(conf, mgr, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	dummyData := []byte("a bunch of jolly leprechauns await")
+	go func() {
+		resp, cerr := http.Post(testURL, "text/plain", bytes.NewReader(dummyData))
+		if assert.NoError(t, cerr) {
+			resp.Body.Close()
+		}
+	}()
+
+	msg, err := readNextMsg(server)
+	require.NoError(t, err)
+	assert.Equal(t, dummyData, message.GetAllBytes(msg)[0])
+
+	server.CloseAsync()
+	assert.NoError(t, server.WaitForClose(time.Second))
+
+	res, err := http.Post(testURL, "text/plain", bytes.NewReader(dummyData))
+	assert.NoError(t, err)
+	assert.Equal(t, 404, res.StatusCode)
+
+	serverTwo, err := input.NewHTTPServer(conf, mgr, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	go func() {
+		resp, cerr := http.Post(testURL, "text/plain", bytes.NewReader(dummyData))
+		if assert.NoError(t, cerr) {
+			resp.Body.Close()
+		}
+	}()
+
+	msg, err = readNextMsg(serverTwo)
+	require.NoError(t, err)
+	assert.Equal(t, dummyData, message.GetAllBytes(msg)[0])
+
+	serverTwo.CloseAsync()
+	assert.NoError(t, serverTwo.WaitForClose(time.Second))
+}
+
 func TestHTTPServerMetadata(t *testing.T) {
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	require.NoError(t, err)
 
 	conf := input.NewConfig()
-	conf.HTTPServer.Path = "/"
+	conf.HTTPServer.Path = "/across/the/rainbow/bridge"
 
 	server, err := input.NewHTTPServer(conf, mgr, log.Noop(), metrics.Noop())
 	require.NoError(t, err)
@@ -245,17 +344,19 @@ func TestHTTPServerMetadata(t *testing.T) {
 		defer resp.Body.Close()
 	}()
 
+	timeout := time.Second * 5
+
 	readNextMsg := func() (types.Message, error) {
 		var tran types.Transaction
 		select {
 		case tran = <-server.TransactionChan():
 			select {
 			case tran.ResponseChan <- response.NewAck():
-			case <-time.After(time.Second):
-				return nil, errors.New("timed out")
+			case <-time.After(timeout):
+				return nil, errors.New("timed out 1")
 			}
-		case <-time.After(time.Second):
-			return nil, errors.New("timed out")
+		case <-time.After(timeout):
+			return nil, errors.New("timed out 2")
 		}
 		return tran.Payload, nil
 	}
@@ -266,6 +367,7 @@ func TestHTTPServerMetadata(t *testing.T) {
 
 	meta := msg.Get(0).Metadata()
 	assert.Equal(t, dummyPath, meta.Get("http_server_request_path"))
+	assert.Equal(t, "POST", meta.Get("http_server_verb"))
 	assert.Regexp(t, "^Go-http-client/", meta.Get("http_server_user_agent"))
 	// Make sure query params are set in the metadata
 	assert.Contains(t, "bar", meta.Get("foo"))
@@ -278,6 +380,7 @@ func TestHTTPtServerPathParameters(t *testing.T) {
 
 	conf := input.NewConfig()
 	conf.HTTPServer.Path = "/test/{foo}/{bar}"
+	conf.HTTPServer.AllowedVerbs = append(conf.HTTPServer.AllowedVerbs, "PUT")
 
 	server, err := input.NewHTTPServer(conf, mgr, log.Noop(), metrics.Noop())
 	require.NoError(t, err)
@@ -300,7 +403,10 @@ func TestHTTPtServerPathParameters(t *testing.T) {
 
 	dummyData := []byte("a bunch of jolly leprechauns await")
 	go func() {
-		resp, cerr := http.Post(serverURL.String(), "text/plain", bytes.NewReader(dummyData))
+		req, cerr := http.NewRequest("PUT", serverURL.String(), bytes.NewReader(dummyData))
+		require.NoError(t, cerr)
+		req.Header.Set("Content-Type", "text/plain")
+		resp, cerr := http.DefaultClient.Do(req)
 		require.NoError(t, cerr)
 		defer resp.Body.Close()
 	}()
@@ -327,6 +433,7 @@ func TestHTTPtServerPathParameters(t *testing.T) {
 	meta := msg.Get(0).Metadata()
 
 	assert.Equal(t, dummyPath, meta.Get("http_server_request_path"))
+	assert.Equal(t, "PUT", meta.Get("http_server_verb"))
 	assert.Equal(t, "foo1", meta.Get("foo"))
 	assert.Equal(t, "bar1", meta.Get("bar"))
 	assert.Equal(t, "will go on", meta.Get("mylove"))
@@ -335,7 +442,7 @@ func TestHTTPtServerPathParameters(t *testing.T) {
 func TestHTTPBadRequests(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +477,7 @@ func TestHTTPBadRequests(t *testing.T) {
 func TestHTTPTimeout(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +517,7 @@ func TestHTTPTimeout(t *testing.T) {
 func TestHTTPRateLimit(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 
 	rlConf := ratelimit.NewConfig()
 	rlConf.Type = ratelimit.TypeLocal
@@ -484,7 +591,7 @@ func TestHTTPRateLimit(t *testing.T) {
 func TestHTTPServerWebsockets(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
@@ -574,7 +681,7 @@ func TestHTTPServerWebsockets(t *testing.T) {
 func TestHTTPServerWSRateLimit(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 
 	rlConf := ratelimit.NewConfig()
 	rlConf.Type = ratelimit.TypeLocal
@@ -663,7 +770,7 @@ func TestHTTPServerWSRateLimit(t *testing.T) {
 func TestHTTPSyncResponseHeaders(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
 		t.Fatal(err)
@@ -673,6 +780,8 @@ func TestHTTPSyncResponseHeaders(t *testing.T) {
 	conf.HTTPServer.Path = "/testpost"
 	conf.HTTPServer.Response.Headers["Content-Type"] = "application/json"
 	conf.HTTPServer.Response.Headers["foo"] = `${!json("field1")}`
+	conf.HTTPServer.Response.ExtractMetadata.IncludePrefixes = []string{"Loca"}
+	conf.HTTPServer.Response.ExtractMetadata.IncludePatterns = []string{"name"}
 
 	h, err := input.NewHTTPServer(conf, mgr, log.Noop(), metrics.Noop())
 	if err != nil {
@@ -689,17 +798,21 @@ func TestHTTPSyncResponseHeaders(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		res, err := http.Post(
-			server.URL+"/testpost",
-			"application/octet-stream",
-			bytes.NewBuffer([]byte(input)),
-		)
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/testpost", bytes.NewBuffer([]byte(input)))
+		if err != nil {
+			t.Error(err)
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("Location", "Asgard")
+		req.Header.Set("Username", "Thor")
+		req.Header.Set("Language", "Norse")
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
 		} else if res.StatusCode != 200 {
 			t.Errorf("Wrong error code returned: %v", res.StatusCode)
 		}
-		resBytes, err := ioutil.ReadAll(res.Body)
+		resBytes, err := io.ReadAll(res.Body)
 		if err != nil {
 			t.Error(err)
 		}
@@ -710,6 +823,15 @@ func TestHTTPSyncResponseHeaders(t *testing.T) {
 			t.Errorf("Wrong sync response header: %v != %v", act, exp)
 		}
 		if exp, act := "bar", res.Header.Get("foo"); exp != act {
+			t.Errorf("Wrong sync response header: %v != %v", act, exp)
+		}
+		if exp, act := "Asgard", res.Header.Get("Location"); exp != act {
+			t.Errorf("Wrong sync response header: %v != %v", act, exp)
+		}
+		if exp, act := "Thor", res.Header.Get("Username"); exp != act {
+			t.Errorf("Wrong sync response header: %v != %v", act, exp)
+		}
+		if exp, act := "", res.Header.Get("Language"); exp != act {
 			t.Errorf("Wrong sync response header: %v != %v", act, exp)
 		}
 	}()
@@ -797,7 +919,7 @@ func readMultipart(res *http.Response) ([]string, error) {
 func TestHTTPSyncResponseMultipart(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	require.NoError(t, err)
 
@@ -870,7 +992,7 @@ func TestHTTPSyncResponseMultipart(t *testing.T) {
 func TestHTTPSyncResponseHeadersStatus(t *testing.T) {
 	t.Parallel()
 
-	reg := apiRegMutWrapper{mut: &http.ServeMux{}}
+	reg := apiRegGorillaMutWrapper{mut: mux.NewRouter()}
 	mgr, err := manager.New(manager.NewConfig(), reg, log.Noop(), metrics.Noop())
 	if err != nil {
 		t.Fatal(err)
@@ -907,7 +1029,7 @@ func TestHTTPSyncResponseHeadersStatus(t *testing.T) {
 		} else if res.StatusCode != 200 {
 			t.Errorf("Wrong error code returned: %v", res.StatusCode)
 		}
-		resBytes, err := ioutil.ReadAll(res.Body)
+		resBytes, err := io.ReadAll(res.Body)
 		if err != nil {
 			t.Error(err)
 		}
@@ -931,7 +1053,7 @@ func TestHTTPSyncResponseHeadersStatus(t *testing.T) {
 		} else if res.StatusCode != 400 {
 			t.Errorf("Wrong error code returned: %v", res.StatusCode)
 		}
-		resBytes, err = ioutil.ReadAll(res.Body)
+		resBytes, err = io.ReadAll(res.Body)
 		if err != nil {
 			t.Error(err)
 		}

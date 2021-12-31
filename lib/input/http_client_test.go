@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -275,7 +274,7 @@ func TestHTTPClientPOST(t *testing.T) {
 		}
 		defer r.Body.Close()
 
-		bodyBytes, err := ioutil.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
 		}
@@ -756,6 +755,79 @@ func TestHTTPClientStreamGETRecover(t *testing.T) {
 	if err := h.WaitForClose(time.Second); err != nil {
 		t.Error(err)
 	}
+}
+
+func TestHTTPClientStreamGETTokenization(t *testing.T) {
+	msgs := []string{`{"token":"foo"}`, `{"token":"bar"}`}
+
+	var tokensLock sync.Mutex
+	updateTokens := true
+	tokens := []string{}
+
+	tserve := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+
+		tokensLock.Lock()
+		if updateTokens {
+			tokens = append(tokens, r.URL.Query().Get("token"))
+		}
+		tokensLock.Unlock()
+
+		body := &bytes.Buffer{}
+		for _, msg := range msgs {
+			body.WriteString(msg)
+			body.WriteByte('\n')
+		}
+
+		w.Header().Add("Content-Type", "application/octet-stream")
+		w.Write(body.Bytes())
+	}))
+	defer tserve.Close()
+
+	conf := NewConfig()
+	conf.HTTPClient.URL = tserve.URL + `/testpost?token=${!json("token")}`
+	conf.HTTPClient.Retry = "1ms"
+	conf.HTTPClient.Stream.Enabled = true
+	conf.HTTPClient.Stream.Multipart = false
+
+	h, err := NewHTTPClient(conf, nil, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		if i == 9 {
+			tokensLock.Lock()
+			updateTokens = false
+			tokensLock.Unlock()
+		}
+
+		for _, testMsg := range msgs {
+			var ts types.Transaction
+			var open bool
+			select {
+			case ts, open = <-h.TransactionChan():
+				require.True(t, open)
+				require.Equal(t, 1, ts.Payload.Len())
+				assert.Equal(t, testMsg, string(ts.Payload.Get(0).Get()))
+			case <-time.After(time.Second):
+				t.Errorf("Action timed out")
+			}
+
+			select {
+			case ts.ResponseChan <- response.NewAck():
+			case <-time.After(time.Second):
+				t.Errorf("Action timed out")
+			}
+		}
+	}
+
+	tokensLock.Lock()
+	assert.Equal(t, []string{
+		"null", "bar", "bar", "bar", "bar", "bar", "bar", "bar", "bar",
+	}, tokens)
+	tokensLock.Unlock()
+
+	h.CloseAsync()
+	require.NoError(t, h.WaitForClose(time.Second))
 }
 
 func BenchmarkHTTPClientGETMultipart(b *testing.B) {

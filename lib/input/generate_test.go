@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +19,7 @@ func TestBloblangInterval(t *testing.T) {
 	conf.Mapping = `root = "hello world"`
 	conf.Interval = "50ms"
 
-	b, err := newBloblang(conf)
+	b, err := newBloblang(types.NoopMgr(), conf)
 	require.NoError(t, err)
 
 	err = b.ConnectWithContext(ctx)
@@ -53,7 +54,7 @@ func TestBloblangCron(t *testing.T) {
 	conf.Mapping = `root = "hello world"`
 	conf.Interval = "@every 1s"
 
-	b, err := newBloblang(conf)
+	b, err := newBloblang(types.NoopMgr(), conf)
 	require.NoError(t, err)
 	assert.NotNil(t, b.schedule)
 	assert.NotNil(t, b.location)
@@ -68,7 +69,7 @@ func TestBloblangCron(t *testing.T) {
 	assert.Equal(t, "hello world", string(m.Get(0).Get()))
 
 	// Second takes another 1s and therefore times out.
-	m, _, err = b.ReadWithContext(ctx)
+	_, _, err = b.ReadWithContext(ctx)
 	assert.EqualError(t, err, "action timed out")
 
 	b.CloseAsync()
@@ -84,7 +85,7 @@ func TestBloblangMapping(t *testing.T) {
 	}`
 	conf.Interval = "1ms"
 
-	b, err := newBloblang(conf)
+	b, err := newBloblang(types.NoopMgr(), conf)
 	require.NoError(t, err)
 
 	err = b.ConnectWithContext(ctx)
@@ -107,7 +108,7 @@ func TestBloblangRemaining(t *testing.T) {
 	conf.Interval = "1ms"
 	conf.Count = 10
 
-	b, err := newBloblang(conf)
+	b, err := newBloblang(types.NoopMgr(), conf)
 	require.NoError(t, err)
 
 	err = b.ConnectWithContext(ctx)
@@ -119,6 +120,12 @@ func TestBloblangRemaining(t *testing.T) {
 		require.Equal(t, 1, m.Len())
 		assert.Equal(t, "foobar", string(m.Get(0).Get()))
 	}
+
+	_, _, err = b.ReadWithContext(ctx)
+	assert.EqualError(t, err, "type was closed")
+
+	_, _, err = b.ReadWithContext(ctx)
+	assert.EqualError(t, err, "type was closed")
 
 	_, _, err = b.ReadWithContext(ctx)
 	assert.EqualError(t, err, "type was closed")

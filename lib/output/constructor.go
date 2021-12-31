@@ -108,10 +108,13 @@ type ConstructorFunc func(Config, types.Manager, log.Modular, metrics.Type, ...t
 
 // WalkConstructors iterates each component constructor.
 func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
+	inferred := docs.ComponentFieldsFromConf(NewConfig())
 	for k, v := range Constructors {
 		conf := v.config
 		if len(v.FieldSpecs) > 0 {
-			conf = docs.FieldComponent().WithChildren(v.FieldSpecs...)
+			conf = docs.FieldComponent().WithChildren(v.FieldSpecs.DefaultAndTypeFrom(inferred[k])...)
+		} else {
+			conf.Children = conf.Children.DefaultAndTypeFrom(inferred[k])
 		}
 		spec := docs.ComponentSpec{
 			Type:        docs.TypeOutput,
@@ -131,7 +134,7 @@ func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
 			}
 		}
 		spec.Description = output.Description(v.Async, v.Batches, spec.Description)
-		fn(ConstructorFunc(v.constructor), spec)
+		fn(v.constructor, spec)
 	}
 	for k, v := range pluginSpecs {
 		spec := docs.ComponentSpec{
@@ -141,7 +144,7 @@ func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
 			Plugin: true,
 			Config: docs.FieldComponent().Unlinted(),
 		}
-		fn(ConstructorFunc(v.constructor), spec)
+		fn(v.constructor, spec)
 	}
 }
 
@@ -151,6 +154,8 @@ var Constructors = map[string]TypeSpec{}
 //------------------------------------------------------------------------------
 
 // String constants representing each output type.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 const (
 	TypeAMQP               = "amqp"
 	TypeAMQP09             = "amqp_0_9"
@@ -174,6 +179,7 @@ const (
 	TypeDynamic            = "dynamic"
 	TypeDynamoDB           = "dynamodb"
 	TypeElasticsearch      = "elasticsearch"
+	TypeFallback           = "fallback"
 	TypeFile               = "file"
 	TypeFiles              = "files"
 	TypeGCPCloudStorage    = "gcp_cloud_storage"
@@ -221,6 +227,8 @@ const (
 //------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all output types.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 type Config struct {
 	Label              string                         `json:"label" yaml:"label"`
 	Type               string                         `json:"type" yaml:"type"`
@@ -246,6 +254,7 @@ type Config struct {
 	Dynamic            DynamicConfig                  `json:"dynamic" yaml:"dynamic"`
 	DynamoDB           writer.DynamoDBConfig          `json:"dynamodb" yaml:"dynamodb"`
 	Elasticsearch      writer.ElasticsearchConfig     `json:"elasticsearch" yaml:"elasticsearch"`
+	Fallback           TryConfig                      `json:"fallback" yaml:"fallback"`
 	File               FileConfig                     `json:"file" yaml:"file"`
 	Files              writer.FilesConfig             `json:"files" yaml:"files"`
 	GCPCloudStorage    GCPCloudStorageConfig          `json:"gcp_cloud_storage" yaml:"gcp_cloud_storage"`
@@ -293,6 +302,8 @@ type Config struct {
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 func NewConfig() Config {
 	return Config{
 		Label:              "",
@@ -319,6 +330,7 @@ func NewConfig() Config {
 		Dynamic:            NewDynamicConfig(),
 		DynamoDB:           writer.NewDynamoDBConfig(),
 		Elasticsearch:      writer.NewElasticsearchConfig(),
+		Fallback:           NewTryConfig(),
 		File:               NewFileConfig(),
 		Files:              writer.NewFilesConfig(),
 		GCPCloudStorage:    NewGCPCloudStorageConfig(),
@@ -411,12 +423,12 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var spec docs.ComponentSpec
-	if aliased.Type, spec, err = docs.GetInferenceCandidateFromNode(docs.TypeOutput, aliased.Type, value); err != nil {
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(nil, docs.TypeOutput, aliased.Type, value); err != nil {
 		return fmt.Errorf("line %v: %w", value.Line, err)
 	}
 
 	if spec.Plugin {
-		pluginNode, err := docs.GetPluginConfigNode(aliased.Type, value)
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
 		if err != nil {
 			return fmt.Errorf("line %v: %v", value.Line, err)
 		}

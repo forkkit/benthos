@@ -3,16 +3,23 @@ package manager_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/lib/cache"
+	"github.com/Jeffail/benthos/v3/lib/input"
 	"github.com/Jeffail/benthos/v3/lib/log"
+	bmanager "github.com/Jeffail/benthos/v3/lib/manager"
+	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
+	"github.com/Jeffail/benthos/v3/lib/output"
 	"github.com/Jeffail/benthos/v3/lib/stream"
 	"github.com/Jeffail/benthos/v3/lib/stream/manager"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -30,6 +37,7 @@ func router(m *manager.Type) *mux.Router {
 	router.HandleFunc("/streams", m.HandleStreamsCRUD)
 	router.HandleFunc("/streams/{id}", m.HandleStreamCRUD)
 	router.HandleFunc("/streams/{id}/stats", m.HandleStreamStats)
+	router.HandleFunc("/resources/{type}/{id}", m.HandleResourceCRUD)
 	return router
 }
 
@@ -99,10 +107,41 @@ func parseGetBody(t *testing.T, data *bytes.Buffer) getBody {
 	result := getBody{
 		Config: stream.NewConfig(),
 	}
-	if err := json.Unmarshal(data.Bytes(), &result); err != nil {
+	if err := yaml.Unmarshal(data.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
 	return result
+}
+
+type endpointReg struct {
+	endpoints map[string]http.HandlerFunc
+	types.DudMgr
+}
+
+func (f *endpointReg) RegisterEndpoint(path, desc string, h http.HandlerFunc) {
+	f.endpoints[path] = h
+}
+
+func TestTypeAPIDisabled(t *testing.T) {
+	r := &endpointReg{endpoints: map[string]http.HandlerFunc{}}
+	_ = manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(r),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+		manager.OptAPIEnabled(true),
+	)
+	assert.NotEmpty(t, r.endpoints)
+
+	r = &endpointReg{endpoints: map[string]http.HandlerFunc{}}
+	_ = manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(r),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+		manager.OptAPIEnabled(false),
+	)
+	assert.Empty(t, r.endpoints)
 }
 
 func TestTypeAPIBadMethods(t *testing.T) {
@@ -230,7 +269,7 @@ func TestTypeAPIBasicOperations(t *testing.T) {
 	newConf = harmlessConf()
 	newConf.Input.Type = "${__TEST_INPUT_TYPE}"
 
-	request = genRequest("POST", "/streams/fooEnv", newConf)
+	request = genRequest("POST", "/streams/fooEnv?chilled=true", newConf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
@@ -271,7 +310,7 @@ func TestTypeAPIPatch(t *testing.T) {
 		t.Errorf("Unexpected result: %v != %v", act, exp)
 	}
 
-	request = genRequest("POST", "/streams/foo", conf)
+	request = genRequest("POST", "/streams/foo?chilled=true", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
 	if exp, act := http.StatusOK, response.Code; exp != act {
@@ -322,90 +361,66 @@ func TestTypeAPIBasicOperationsYAML(t *testing.T) {
 	r := router(mgr)
 	conf := harmlessConf()
 
-	request := genYAMLRequest("PUT", "/streams/foo", conf)
+	request := genYAMLRequest("PUT", "/streams/foo?chilled=true", conf)
 	response := httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusNotFound, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusNotFound, response.Code)
 
 	request = genYAMLRequest("GET", "/streams/foo", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusNotFound, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusNotFound, response.Code)
+
+	request = genYAMLRequest("POST", "/streams/foo?chilled=true", conf)
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
 
 	request = genYAMLRequest("POST", "/streams/foo", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
-
-	request = genYAMLRequest("POST", "/streams/foo", conf)
-	response = httptest.NewRecorder()
-	r.ServeHTTP(response, request)
-	if exp, act := http.StatusBadRequest, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusBadRequest, response.Code)
 
 	request = genYAMLRequest("GET", "/streams/bar", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusNotFound, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusNotFound, response.Code)
 
 	request = genYAMLRequest("GET", "/streams/foo", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
+
 	info := parseGetBody(t, response.Body)
-	if !info.Active {
-		t.Error("Stream not active")
-	} else if act, exp := info.Config, conf; !reflect.DeepEqual(act, exp) {
-		t.Errorf("Unexpected config: %v != %v", act, exp)
-	}
+	require.True(t, info.Active)
+	assert.Equal(t, conf, info.Config)
 
 	newConf := harmlessConf()
 	newConf.Buffer.Type = "memory"
 
-	request = genYAMLRequest("PUT", "/streams/foo", newConf)
+	request = genYAMLRequest("PUT", "/streams/foo?chilled=true", newConf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
 
 	request = genYAMLRequest("GET", "/streams/foo", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
+
 	info = parseGetBody(t, response.Body)
-	if !info.Active {
-		t.Error("Stream not active")
-	} else if act, exp := info.Config, newConf; !reflect.DeepEqual(act, exp) {
-		t.Errorf("Unexpected config: %v != %v", act, exp)
-	}
+	require.True(t, info.Active)
+	assert.Equal(t, newConf, info.Config)
 
 	request = genYAMLRequest("DELETE", "/streams/foo", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
 
 	request = genYAMLRequest("DELETE", "/streams/foo", conf)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusNotFound, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusNotFound, response.Code)
 }
 
 func TestTypeAPIList(t *testing.T) {
@@ -473,11 +488,11 @@ func TestTypeAPISetStreams(t *testing.T) {
 	bar2Conf.Input.HTTPServer.Path = "BAR_TWO"
 	bazConf := harmlessConf()
 	bazConf.Input.HTTPServer.Path = "BAZ_ONE"
-	streamsBody := map[string]stream.Config{
-		"bar":  barConf,
-		"bar2": bar2Conf,
-		"baz":  bazConf,
-	}
+
+	streamsBody := map[string]interface{}{}
+	streamsBody["bar"], _ = barConf.Sanitised()
+	streamsBody["bar2"], _ = bar2Conf.Sanitised()
+	streamsBody["baz"], _ = bazConf.Sanitised()
 
 	request = genRequest("POST", "/streams", streamsBody)
 	response = httptest.NewRecorder()
@@ -519,6 +534,89 @@ func TestTypeAPISetStreams(t *testing.T) {
 	assert.Equal(t, "BAZ_ONE", conf.Config.Input.HTTPServer.Path)
 }
 
+func TestTypeAPIStreamsDefaultConf(t *testing.T) {
+	mgr := manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(types.DudMgr{}),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+	)
+
+	r := router(mgr)
+
+	body := []byte(`{
+	"foo": {
+		"input": {
+			"nanomsg": {}
+		},
+		"output": {
+			"nanomsg": {}
+		}
+	}
+}`)
+
+	request, err := http.NewRequest("POST", "/streams", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	status, err := mgr.Read("foo")
+	require.NoError(t, err)
+
+	assert.Equal(t, status.Config().Input.Nanomsg.PollTimeout, "5s")
+}
+
+func TestTypeAPIStreamsLinting(t *testing.T) {
+	mgr := manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(types.DudMgr{}),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+	)
+
+	r := router(mgr)
+
+	body := []byte(`{
+	"foo": {
+		"input": {
+			"nanomsg": {}
+		},
+		"output": {
+			"type":"nanomsg",
+			"file": {}
+		}
+	},
+	"bar": {
+		"input": {
+			"type":"nanomsg",
+			"file": {}
+		},
+		"output": {
+			"nanomsg": {}
+		}
+	}
+}`)
+
+	request, err := http.NewRequest("POST", "/streams", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+
+	expLints := `{"lint_errors":["stream 'bar': line 14: field file is invalid when the component type is nanomsg (input)","stream 'foo': line 8: field file is invalid when the component type is nanomsg (output)"]}`
+	assert.Equal(t, expLints, response.Body.String())
+
+	request, err = http.NewRequest("POST", "/streams?chilled=true", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+}
+
 func TestTypeAPIDefaultConf(t *testing.T) {
 	mgr := manager.New(
 		manager.OptSetLogger(log.Noop()),
@@ -531,25 +629,27 @@ func TestTypeAPIDefaultConf(t *testing.T) {
 
 	body := []byte(`{
 	"input": {
-		"type": "nanomsg"
+		"nanomsg": {}
 	},
 	"output": {
-		"type": "nanomsg"
+		"nanomsg": {}
 	}
 }`)
 
 	request, err := http.NewRequest("POST", "/streams/foo", bytes.NewReader(body))
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
+
 	response := httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
+
+	status, err := mgr.Read("foo")
+	require.NoError(t, err)
+
+	assert.Equal(t, status.Config().Input.Nanomsg.PollTimeout, "5s")
 }
 
-func TestTypeAPIGetStats(t *testing.T) {
+func TestTypeAPILinting(t *testing.T) {
 	mgr := manager.New(
 		manager.OptSetLogger(log.Noop()),
 		manager.OptSetStats(metrics.Noop()),
@@ -559,40 +659,272 @@ func TestTypeAPIGetStats(t *testing.T) {
 
 	r := router(mgr)
 
-	if err := mgr.Create("foo", harmlessConf()); err != nil {
-		t.Fatal(err)
+	body := []byte(`{
+	"input": {
+		"type":"nanomsg",
+		"file": {}
+	},
+	"output": {
+		"nanomsg": {}
+	},
+	"cache_resources": [
+		{"label":"not_interested","memory":{}}
+	]
+}`)
+
+	request, err := http.NewRequest("POST", "/streams/foo", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+
+	expLints := `{"lint_errors":["line 4: field file is invalid when the component type is nanomsg (input)","line 9: field cache_resources not recognised"]}`
+	assert.Equal(t, expLints, response.Body.String())
+
+	request, err = http.NewRequest("POST", "/streams/foo?chilled=true", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code)
+}
+
+func TestResourceAPILinting(t *testing.T) {
+	tests := []struct {
+		name   string
+		ctype  string
+		config string
+		lints  []string
+	}{
+		{
+			name:  "cache bad",
+			ctype: "cache",
+			config: `memory:
+  ttl: 123
+  nope: nah
+  compaction_interval: 1s`,
+			lints: []string{
+				"line 3: field nope not recognised",
+			},
+		},
+		{
+			name:  "input bad",
+			ctype: "input",
+			config: `http_server:
+  path: /foo/bar
+  nope: nah`,
+			lints: []string{
+				"line 3: field nope not recognised",
+			},
+		},
+		{
+			name:  "output bad",
+			ctype: "output",
+			config: `http_server:
+  path: /foo/bar
+  nope: nah`,
+			lints: []string{
+				"line 3: field nope not recognised",
+			},
+		},
+		{
+			name:  "processor bad",
+			ctype: "processor",
+			config: `split:
+  size: 10
+  nope: nah`,
+			lints: []string{
+				"line 3: field nope not recognised",
+			},
+		},
+		{
+			name:  "rate limit bad",
+			ctype: "rate_limit",
+			config: `local:
+  count: 10
+  nope: nah`,
+			lints: []string{
+				"line 3: field nope not recognised",
+			},
+		},
 	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bmgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), types.DudMgr{}, log.Noop(), metrics.Noop())
+			require.NoError(t, err)
+
+			mgr := manager.New(
+				manager.OptSetLogger(log.Noop()),
+				manager.OptSetStats(metrics.Noop()),
+				manager.OptSetManager(bmgr),
+				manager.OptSetAPITimeout(time.Millisecond*100),
+			)
+
+			r := router(mgr)
+
+			url := fmt.Sprintf("/resources/%v/foo", test.ctype)
+			body := []byte(test.config)
+
+			request, err := http.NewRequest("POST", url, bytes.NewReader(body))
+			require.NoError(t, err)
+
+			response := httptest.NewRecorder()
+			r.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusBadRequest, response.Code)
+
+			expLints, err := json.Marshal(struct {
+				LintErrors []string `json:"lint_errors"`
+			}{
+				LintErrors: test.lints,
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, string(expLints), response.Body.String())
+
+			request, err = http.NewRequest("POST", url+"?chilled=true", bytes.NewReader(body))
+			require.NoError(t, err)
+
+			response = httptest.NewRecorder()
+			r.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusOK, response.Code)
+		})
+	}
+}
+
+func TestTypeAPIGetStats(t *testing.T) {
+	mgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), types.DudMgr{}, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	smgr := manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(mgr),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+	)
+
+	r := router(smgr)
+
+	err = smgr.Create("foo", harmlessConf())
+	require.NoError(t, err)
 
 	<-time.After(time.Millisecond * 100)
 
 	request := genRequest("GET", "/streams/not_exist/stats", nil)
 	response := httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusNotFound, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusNotFound, response.Code)
 
 	request = genRequest("POST", "/streams/foo/stats", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusBadRequest, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusBadRequest, response.Code)
 
 	request = genRequest("GET", "/streams/foo/stats", nil)
 	response = httptest.NewRecorder()
 	r.ServeHTTP(response, request)
-	if exp, act := http.StatusOK, response.Code; exp != act {
-		t.Errorf("Unexpected result: %v != %v", act, exp)
-	}
+	assert.Equal(t, http.StatusOK, response.Code)
 
 	stats, err := gabs.ParseJSON(response.Body.Bytes())
-	if err != nil {
-		t.Fatal(err)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1.0, stats.S("input", "running").Data(), response.Body.String())
+}
+
+func TestTypeAPISetResources(t *testing.T) {
+	bmgr, err := bmanager.NewV2(bmanager.NewResourceConfig(), types.DudMgr{}, log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	tChan := make(chan types.Transaction)
+	bmgr.SetPipe("feed_in", tChan)
+
+	mgr := manager.New(
+		manager.OptSetLogger(log.Noop()),
+		manager.OptSetStats(metrics.Noop()),
+		manager.OptSetManager(bmgr),
+		manager.OptSetAPITimeout(time.Millisecond*100),
+	)
+
+	tmpDir, err := os.MkdirTemp("", "resources")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	dir1 := filepath.Join(tmpDir, "dir1")
+	require.NoError(t, os.MkdirAll(dir1, 0o750))
+
+	dir2 := filepath.Join(tmpDir, "dir2")
+	require.NoError(t, os.MkdirAll(dir2, 0o750))
+
+	r := router(mgr)
+
+	cacheConf := cache.NewConfig()
+	cacheConf.Type = cache.TypeFile
+	cacheConf.File.Directory = dir1
+
+	request := genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", cacheConf)
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+
+	streamConf := stream.NewConfig()
+	streamConf.Input.Type = input.TypeInproc
+	streamConf.Input.Inproc = "feed_in"
+	streamConf.Output.Type = output.TypeCache
+	streamConf.Output.Cache.Key = `${! json("id") }`
+	streamConf.Output.Cache.Target = "foocache"
+
+	request = genYAMLRequest("POST", "/streams/foo?chilled=true", streamConf)
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+
+	resChan := make(chan types.Response)
+	select {
+	case tChan <- types.NewTransaction(message.New([][]byte{[]byte(`{"id":"first","content":"hello world"}`)}), resChan):
+	case <-time.After(time.Second * 5):
+		t.Fatal("timed out")
+	}
+	select {
+	case <-resChan:
+	case <-time.After(time.Second * 5):
+		t.Fatal("timed out")
 	}
 
-	if exp, act := float64(1), stats.S("input", "running").Data().(float64); exp != act {
-		t.Errorf("Wrong stat value: %v != %v", act, exp)
-		t.Logf("Metrics: %v", stats)
+	cacheConf.File.Directory = dir2
+
+	request = genYAMLRequest("POST", "/resources/cache/foocache?chilled=true", cacheConf)
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+
+	select {
+	case tChan <- types.NewTransaction(message.New([][]byte{[]byte(`{"id":"second","content":"hello world 2"}`)}), resChan):
+	case <-time.After(time.Second * 5):
+		t.Fatal("timed out")
 	}
+	select {
+	case <-resChan:
+	case <-time.After(time.Second * 5):
+		t.Fatal("timed out")
+	}
+
+	files, err := os.ReadDir(dir1)
+	require.NoError(t, err)
+	assert.Len(t, files, 1)
+
+	file1Bytes, err := os.ReadFile(filepath.Join(dir1, "first"))
+	require.NoError(t, err)
+	assert.Equal(t, `{"id":"first","content":"hello world"}`, string(file1Bytes))
+
+	files, err = os.ReadDir(dir2)
+	require.NoError(t, err)
+	assert.Len(t, files, 1)
+
+	file2Bytes, err := os.ReadFile(filepath.Join(dir2, "second"))
+	require.NoError(t, err)
+	assert.Equal(t, `{"id":"second","content":"hello world 2"}`, string(file2Bytes))
 }

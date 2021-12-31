@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/Jeffail/benthos/v3/lib/util/aws/lambda/client"
-	"github.com/opentracing/opentracing-go"
 )
 
 //------------------------------------------------------------------------------
@@ -71,7 +71,7 @@ output:
 By default Benthos will use a shared credentials file when connecting to AWS
 services. It's also possible to set them explicitly at the component level,
 allowing you to transfer data across accounts. You can find out more
-[in this document](/docs/guides/aws).`,
+[in this document](/docs/guides/cloud/aws).`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("parallel", "Whether messages of a batch should be dispatched in parallel."),
 		}.Merge(client.FieldSpecs()),
@@ -129,7 +129,7 @@ can read about these patterns [here](/docs/configuration/error_handling).
 By default Benthos will use a shared credentials file when connecting to AWS
 services. It's also possible to set them explicitly at the component level,
 allowing you to transfer data across accounts. You can find out more
-[in this document](/docs/guides/aws).`,
+[in this document](/docs/guides/cloud/aws).`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("parallel", "Whether messages of a batch should be dispatched in parallel."),
 		}.Merge(client.FieldSpecs()),
@@ -241,7 +241,7 @@ func (l *Lambda) ProcessMessage(msg types.Message) ([]types.Message, types.Respo
 	var resultMsg types.Message
 	if !l.parallel || msg.Len() == 1 {
 		resultMsg = msg.Copy()
-		IteratePartsWithSpan("aws_lambda", nil, resultMsg, func(i int, _ opentracing.Span, p types.Part) error {
+		IteratePartsWithSpanV2("aws_lambda", nil, resultMsg, func(i int, _ *tracing.Span, p types.Part) error {
 			if err := l.client.InvokeV2(p); err != nil {
 				l.mErr.Incr(1)
 				l.mErrLambda.Incr(1)

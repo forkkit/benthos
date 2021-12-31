@@ -228,6 +228,15 @@ func (a *AMQP1) ReadWithContext(ctx context.Context) (types.Message, AsyncAckFn,
 		setMetadata(part, "amqp_content_encoding", amqpMsg.Properties.ContentEncoding)
 		setMetadata(part, "amqp_creation_time", amqpMsg.Properties.CreationTime)
 	}
+	if amqpMsg.Annotations != nil {
+		for k, v := range amqpMsg.Annotations {
+			keyStr, keyIsStr := k.(string)
+			valStr, valIsStr := v.(string)
+			if keyIsStr && valIsStr {
+				setMetadata(part, keyStr, valStr)
+			}
+		}
+	}
 
 	msg.Append(part)
 
@@ -242,9 +251,15 @@ func (a *AMQP1) ReadWithContext(ctx context.Context) (types.Message, AsyncAckFn,
 			done = nil
 		}
 
+		// TODO: These methods were moved in v0.16.0, but nacking seems broken
+		// (integration tests fail)
 		if res.Error() != nil {
+			// nolint: gocritic
+			// return conn.receiver.ModifyMessage(ctx, amqpMsg, true, false, amqpMsg.Annotations)
 			return amqpMsg.Modify(ctx, true, false, amqpMsg.Annotations)
 		}
+		// nolint: gocritic
+		// return conn.receiver.AcceptMessage(ctx, amqpMsg)
 		return amqpMsg.Accept(ctx)
 	}, nil
 }

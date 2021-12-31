@@ -34,6 +34,7 @@ input:
     addresses:
       - localhost:9092
     topics: []
+    target_version: 1.0.0
     consumer_group: benthos_consumer_group
     client_id: benthos_kafka_input
     checkpoint_limit: 1
@@ -50,10 +51,12 @@ input:
     addresses:
       - localhost:9092
     topics: []
+    target_version: 1.0.0
     tls:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     sasl:
@@ -65,6 +68,7 @@ input:
       token_key: ""
     consumer_group: benthos_consumer_group
     client_id: benthos_kafka_input
+    rack_id: ""
     start_from_oldest: true
     checkpoint_limit: 1
     commit_period: 1s
@@ -75,7 +79,6 @@ input:
       heartbeat_interval: 3s
       rebalance_timeout: 60s
     fetch_buffer_cap: 256
-    target_version: 1.0.0
     batching:
       count: 0
       byte_size: 0
@@ -110,6 +113,14 @@ This input adds the following metadata fields to each message:
 The field `kafka_lag` is the calculated difference between the high water mark offset of the partition at the time of ingestion and the current message offset.
 
 You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).
+
+### Troubleshooting
+
+If you're seeing issues writing to or reading from Kafka with this component then it's worth trying out the newer [`kafka_franz` input](/docs/components/inputs/kafka_franz).
+
+- I'm seeing logs that report `Failed to connect to kafka: kafka: client has run out of available brokers to talk to (Is your cluster reachable?)`, but the brokers are definitely reachable.
+
+Unfortunately this error message will appear for a wide range of connection problems even when the broker endpoint can be reached. Double check your authentication configuration and also ensure that you have [enabled TLS](#tlsenabled) if applicable.
 
 ## Fields
 
@@ -166,6 +177,14 @@ topics:
   - foo:0-5
 ```
 
+### `target_version`
+
+The version of the Kafka protocol to use. This limits the capabilities used by the client and should ideally match the version of your brokers.
+
+
+Type: `string`  
+Default: `"1.0.0"`  
+
 ### `tls`
 
 Custom TLS settings can be used to override system defaults.
@@ -198,6 +217,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -218,6 +254,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -280,7 +317,7 @@ Default: `""`
 
 | Option | Summary |
 |---|---|
-| `PLAIN` | Plain text authentication. |
+| `PLAIN` | Plain text authentication. NOTE: When using plain text auth it is extremely likely that you'll also need to [enable TLS](#tlsenabled). |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `SCRAM-SHA-256` | Authentication using the SCRAM-SHA-256 mechanism. |
 | `SCRAM-SHA-512` | Authentication using the SCRAM-SHA-512 mechanism. |
@@ -354,6 +391,14 @@ An identifier for the client connection.
 Type: `string`  
 Default: `"benthos_kafka_input"`  
 
+### `rack_id`
+
+A rack identifier for this client.
+
+
+Type: `string`  
+Default: `""`  
+
 ### `start_from_oldest`
 
 If an offset is not found for a topic partition, determines whether to consume from the oldest available offset, otherwise messages are consumed from the latest offset.
@@ -364,7 +409,7 @@ Default: `true`
 
 ### `checkpoint_limit`
 
-EXPERIMENTAL: The maximum number of messages of the same topic and partition that can be processed at a given time. Increasing this limit enables parallel processing and batching at the output level to work on individual partitions. Any given offset will not be committed unless all messages under that offset are delivered in order to preserve at least once delivery guarantees.
+The maximum number of messages of the same topic and partition that can be processed at a given time. Increasing this limit enables parallel processing and batching at the output level to work on individual partitions. Any given offset will not be committed unless all messages under that offset are delivered in order to preserve at least once delivery guarantees.
 
 
 Type: `int`  
@@ -442,14 +487,6 @@ The maximum number of unprocessed messages to fetch at a given time.
 
 Type: `int`  
 Default: `256`  
-
-### `target_version`
-
-The version of the Kafka protocol to use.
-
-
-Type: `string`  
-Default: `"1.0.0"`  
 
 ### `batching`
 

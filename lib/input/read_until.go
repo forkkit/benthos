@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
@@ -53,14 +52,14 @@ input:
 			},
 		},
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("input", "The child input to consume from.").HasType(docs.FieldInput),
-			docs.FieldCommon(
+			docs.FieldCommon("input", "The child input to consume from.").HasType(docs.FieldTypeInput),
+			docs.FieldBloblang(
 				"check",
 				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether the input should now be closed.",
 				`this.type == "foo"`,
 				`count("messages") >= 100`,
-			).HasDefault("").Linter(docs.LintBloblangMapping),
-			docs.FieldDeprecated("condition").HasType(docs.FieldCondition).OmitWhen(func(field, _ interface{}) (string, bool) {
+			).HasDefault(""),
+			docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition).OmitWhen(func(field, _ interface{}) (string, bool) {
 				defaultBytes, err := yaml.Marshal(condition.NewConfig())
 				if err != nil {
 					return "", false
@@ -193,7 +192,7 @@ func NewReadUntil(
 
 	var check *mapping.Executor
 	if len(conf.ReadUntil.Check) > 0 {
-		if check, err = bloblang.NewMapping("", conf.ReadUntil.Check); err != nil {
+		if check, err = interop.NewBloblangMapping(mgr, conf.ReadUntil.Check); err != nil {
 			return nil, fmt.Errorf("failed to parse check query: %w", err)
 		}
 	}
@@ -248,6 +247,8 @@ func (r *ReadUntil) loop() {
 	defer func() {
 		if r.wrapped != nil {
 			r.wrapped.CloseAsync()
+
+			// TODO: This triggers a tier 2 shutdown in the child.
 			err := r.wrapped.WaitForClose(time.Second)
 			for ; err != nil; err = r.wrapped.WaitForClose(time.Second) {
 			}

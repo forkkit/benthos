@@ -8,9 +8,25 @@ import (
 	_ "github.com/Jeffail/benthos/v3/public/components/legacy"
 
 	// Import new service packages.
-	_ "github.com/Jeffail/benthos/v3/internal/service/confluent"
-	_ "github.com/Jeffail/benthos/v3/internal/service/gcp"
-	_ "github.com/Jeffail/benthos/v3/internal/service/mongodb"
-	_ "github.com/Jeffail/benthos/v3/internal/service/nats"
-	_ "github.com/Jeffail/benthos/v3/internal/service/pulsar"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/aws"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/confluent"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/gcp"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/generic"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/kafka"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/mongodb"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/msgpack"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/nats"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/pulsar"
+	_ "github.com/Jeffail/benthos/v3/internal/impl/sql"
+	"github.com/Jeffail/benthos/v3/internal/template"
+
+	// Import all (supported) sql drivers
+	_ "github.com/ClickHouse/clickhouse-go"
+	_ "github.com/denisenkom/go-mssqldb"
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 )
+
+func init() {
+	_, _ = template.InitTemplates()
+}

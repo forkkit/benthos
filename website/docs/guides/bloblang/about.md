@@ -18,7 +18,7 @@ This document outlines the core features of the Bloblang language, but if you're
 
 ## Assignment
 
-A Bloblang mapping expresses how to create a new document by extracting data from an existing input document. Assignments consist of a [dot path][field_paths] argument on the left-hand side describing a field to be created within the new document, and a right-hand side query describing what the content of the new field should be.
+A Bloblang mapping expresses how to create a new document by extracting data from an existing input document. Assignments consist of a dot separated path segments on the left-hand side describing a field to be created within the new document, and a right-hand side query describing what the content of the new field should be.
 
 The keyword `root` on the left-hand side refers to the root of the new document, the keyword `this` on the right-hand side refers to the current context of the query, which is the read-only input document when querying from the root of a mapping:
 
@@ -44,6 +44,19 @@ root.foo = "added value"
 ```
 
 If the new document `root` is never assigned to or otherwise mutated then the original document remains unchanged.
+
+### Special Characters in Paths
+
+Quotes can be used to describe sections of a field path that contain whitespace, dots or other special characters:
+
+```coffee
+# Use quotes around a path segment in order to include whitespace or dots within
+# the path
+root."foo.bar".baz = this."buz bev".fub
+
+# In:  {"buz bev":{"fub":"hello world"}}
+# Out: {"foo.bar":{"baz":"hello world"}}
+```
 
 ### Non-structured Data
 
@@ -110,19 +123,6 @@ The [`meta` function][blobl.functions.meta] returns the read-only metadata of th
 
 If you wish to set a metadata value and then refer back to it later then first set it [as a variable][blobl.variables].
 
-### Special Characters in Paths
-
-Quotes can be used to describe sections of a field path that contain whitespace, dots or other special characters:
-
-```coffee
-# Use quotes around a path segment in order to include whitespace or dots within
-# the path
-root."foo.bar".baz = this."buz bev".fub
-
-# In:  {"buz bev":{"fub":"hello world"}}
-# Out: {"foo.bar":{"baz":"hello world"}}
-```
-
 ## Coalesce
 
 The pipe operator (`|`) used within brackets allows you to coalesce multiple candidates for a path segment. The first field that exists and has a non-null value will be selected:
@@ -173,7 +173,7 @@ root = this.some.value # And now this is a comment
 
 ## Boolean Logic and Arithmetic
 
-Bloblang supports a range of boolean operators `!`, `>`, `>=`, `==`, `<`, `<=`, `&&`, `||` and arithmetic operators `+`, `-`, `*`, `/`, `%`:
+Bloblang supports a range of boolean operators `!`, `>`, `>=`, `==`, `<`, `<=`, `&&`, `||` and mathematical operators `+`, `-`, `*`, `/`, `%`:
 
 ```coffee
 root.is_big = this.number > 100
@@ -185,6 +185,8 @@ root.multiplied = this.number * 7
 # In:  {"number":150}
 # Out: {"is_big":true,"multiplied":1050}
 ```
+
+For more information about these operators and how they work check out [the arithmetic page][blobl.arithmetic].
 
 ## Conditional Mapping
 
@@ -279,11 +281,18 @@ root.doc.received_at = now()
 root.doc.host = hostname()
 ```
 
-You can find a full list of functions in [this doc][blobl.functions].
+Functions support both named and nameless style arguments:
+
+```coffee
+root.values_one = range(start: 0, stop: this.max, step: 2)
+root.values_two = range(0, this.max, 2)
+```
+
+You can find a full list of functions and their parameters in [the functions page][blobl.functions].
 
 ## Methods
 
-Methods provide most of the power in Bloblang as they allow you to augment query values and can be added to any expression:
+Methods are similar to functions but enact upon a target value, these provide most of the power in Bloblang as they allow you to augment query values and can be added to any expression (including other methods):
 
 ```coffee
 root.doc.id = this.thing.id.string().catch(uuid_v4())
@@ -295,7 +304,14 @@ root.doc.reduced_nums = this.thing.nums.map_each(num -> if num < 10 {
 root.has_good_taste = ["pikachu","mewtwo","magmar"].contains(this.user.fav_pokemon)
 ```
 
-You can find a full list of methods in [this doc][blobl.methods].
+Methods also support both named and nameless style arguments:
+
+```coffee
+root.foo_one = this.(bar | baz).trim().replace(old: "dog", new: "cat")
+root.foo_two = this.(bar | baz).trim().replace("dog", "cat")
+```
+
+You can find a full list of methods and their parameters in [the methods page][blobl.methods].
 
 ## Maps
 
@@ -379,7 +395,15 @@ root.foo = this.bar.index(5).or("default")
 
 It's possible to execute unit tests for your Bloblang mappings using the standard Benthos unit test capabilities outlined [in this document][configuration.unit_testing].
 
-[field_paths]: /docs/configuration/field_paths
+## Trouble Shooting
+
+1. I'm seeing `unable to reference message as structured (with 'this')` when I try to run mappings with `benthos blobl`.
+
+That particular error message means the mapping is failing to parse what's being fed in as a JSON document. Make sure that the data you are feeding in is valid JSON, and also that the documents *do not* contain line breaks as `benthos blobl` will parse each line individually.
+
+Why? That's a good question. Bloblang supports non-JSON formats too, so it can't delimit documents with a streaming JSON parser like tools such as `jq`, so instead it uses line breaks to determine the boundaries of each message.
+
+[blobl.arithmetic]: /docs/guides/bloblang/arithmetic
 [blobl.walkthrough]: /docs/guides/bloblang/walkthrough
 [blobl.variables]: #variables
 [blobl.proc]: /docs/components/processors/bloblang

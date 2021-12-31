@@ -16,6 +16,29 @@ var AllInputs = &InputSet{
 
 //------------------------------------------------------------------------------
 
+// InputAdd adds a new input to this environment by providing a constructor and
+// documentation.
+func (e *Environment) InputAdd(constructor InputConstructor, spec docs.ComponentSpec) error {
+	return e.inputs.Add(constructor, spec)
+}
+
+// InputInit attempts to initialise an input from a config.
+func (e *Environment) InputInit(
+	hasBatchProc bool,
+	conf input.Config,
+	mgr NewManagement,
+	pipelines ...types.PipelineConstructorFunc,
+) (types.Input, error) {
+	return e.inputs.Init(hasBatchProc, conf, mgr, pipelines...)
+}
+
+// InputDocs returns a slice of input specs, which document each method.
+func (e *Environment) InputDocs() []docs.ComponentSpec {
+	return e.inputs.Docs()
+}
+
+//------------------------------------------------------------------------------
+
 // InputConstructorFromSimple provides a way to define an input constructor
 // without manually initializing processors of the config.
 func InputConstructorFromSimple(fn func(input.Config, NewManagement) (input.Type, error)) InputConstructor {
@@ -48,9 +71,6 @@ type InputSet struct {
 func (s *InputSet) Add(constructor InputConstructor, spec docs.ComponentSpec) error {
 	if s.specs == nil {
 		s.specs = map[string]inputSpec{}
-	}
-	if _, exists := s.specs[spec.Name]; exists {
-		return fmt.Errorf("conflicting input name: %v", spec.Name)
 	}
 	s.specs[spec.Name] = inputSpec{
 		constructor: constructor,

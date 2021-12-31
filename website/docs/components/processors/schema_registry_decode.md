@@ -15,8 +15,9 @@ categories: ["Parsing","Integration"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Automatically decodes and validates messages with schemas from a Confluent Schema Registry service.
 
 
@@ -45,6 +46,7 @@ schema_registry_decode:
   tls:
     skip_cert_verify: false
     enable_renegotiation: false
+    root_cas: ""
     root_cas_file: ""
     client_certs: []
 ```
@@ -55,6 +57,19 @@ schema_registry_decode:
 Decodes messages automatically from a schema stored within a [Confluent Schema Registry service](https://docs.confluent.io/platform/current/schema-registry/index.html) by extracting a schema ID from the message and obtaining the associated schema from the registry. If a message fails to match against the schema then it will remain unchanged and the error can be caught using error handling methods outlined [here](/docs/configuration/error_handling).
 
 Currently only Avro schemas are supported.
+
+### Avro JSON Format
+
+This processor creates documents formatted as [Avro JSON](https://avro.apache.org/docs/current/spec.html#json_encoding) when decoding Avro schemas. In this format the value of a union is encoded in JSON as follows:
+
+- if its type is `null`, then it is encoded as a JSON `null`;
+- otherwise it is encoded as a JSON object with one name/value pair whose name is the type's name and whose value is the recursively encoded value. For Avro's named types (record, fixed or enum) the user-specified name is used, for other types the type name is used.
+
+For example, the union schema `["null","string","Foo"]`, where `Foo` is a record name, would encode:
+
+- `null` as `null`;
+- the string `"a"` as `{"string": "a"}`; and
+- a `Foo` instance as `{"Foo": {...}}`, where `{...}` indicates the JSON encoding of a `Foo` instance.
 
 ## Fields
 
@@ -88,6 +103,23 @@ Whether to allow the remote server to repeatedly request renegotiation. Enable t
 Type: `bool`  
 Default: `false`  
 Requires version 3.45.0 or newer  
+
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
 
 ### `tls.root_cas_file`
 

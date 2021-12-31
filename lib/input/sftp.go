@@ -10,8 +10,8 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/codec"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	sftpSetup "github.com/Jeffail/benthos/v3/internal/impl/sftp"
 	"github.com/Jeffail/benthos/v3/internal/interop"
-	sftpSetup "github.com/Jeffail/benthos/v3/internal/service/sftp"
 	"github.com/Jeffail/benthos/v3/lib/input/reader"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
@@ -77,7 +77,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 				"credentials",
 				"The credentials to use to log into the server.",
 			).WithChildren(sftpSetup.CredentialsDocs()...),
-			docs.FieldCommon(
+			docs.FieldString(
 				"paths",
 				"A list of paths to consume sequentially. Glob patterns are supported.",
 			).Array(),
@@ -210,6 +210,7 @@ func (s *sftpReader) ConnectWithContext(ctx context.Context) error {
 		if s.client, err = s.conf.Credentials.GetClient(s.conf.Address); err != nil {
 			return err
 		}
+		s.log.Debugln("Finding more paths")
 		s.paths, err = s.getFilePaths()
 		if err != nil {
 			return err
@@ -220,6 +221,7 @@ func (s *sftpReader) ConnectWithContext(ctx context.Context) error {
 		if !s.conf.Watcher.Enabled {
 			s.client.Close()
 			s.client = nil
+			s.log.Debugln("Paths exhausted, closing input")
 			return types.ErrTypeClosed
 		}
 		select {

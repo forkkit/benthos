@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/shutdown"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/input/reader"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -81,10 +81,15 @@ func (r *AsyncReader) loop() {
 
 	defer func() {
 		r.reader.CloseAsync()
-		err := r.reader.WaitForClose(time.Second)
-		for ; err != nil; err = r.reader.WaitForClose(time.Second) {
-			r.log.Warnf("Waiting for input to close, blocked by: %v\n", err)
-		}
+		go func() {
+			select {
+			case <-r.shutSig.CloseNowChan():
+				_ = r.reader.WaitForClose(0)
+			case <-r.shutSig.HasClosedChan():
+			}
+		}()
+		_ = r.reader.WaitForClose(shutdown.MaximumShutdownWait())
+
 		mRunning.Decr(1)
 		atomic.StoreInt32(&r.connected, 0)
 

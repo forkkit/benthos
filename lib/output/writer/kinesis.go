@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message/batch"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -87,8 +87,20 @@ type Kinesis struct {
 }
 
 // NewKinesis creates a new Amazon Kinesis writer.Type.
+//
+// Deprecated: use the V2 API instead.
 func NewKinesis(
 	conf KinesisConfig,
+	log log.Modular,
+	stats metrics.Type,
+) (*Kinesis, error) {
+	return NewKinesisV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewKinesisV2 creates a new Amazon Kinesis writer.Type.
+func NewKinesisV2(
+	conf KinesisConfig,
+	mgr types.Manager,
 	log log.Modular,
 	stats metrics.Type,
 ) (*Kinesis, error) {
@@ -105,10 +117,10 @@ func NewKinesis(
 		streamName:      aws.String(conf.Stream),
 	}
 	var err error
-	if k.hashKey, err = bloblang.NewField(conf.HashKey); err != nil {
+	if k.hashKey, err = interop.NewBloblangField(mgr, conf.HashKey); err != nil {
 		return nil, fmt.Errorf("failed to parse hash key expression: %v", err)
 	}
-	if k.partitionKey, err = bloblang.NewField(conf.PartitionKey); err != nil {
+	if k.partitionKey, err = interop.NewBloblangField(mgr, conf.PartitionKey); err != nil {
 		return nil, fmt.Errorf("failed to parse partition key expression: %v", err)
 	}
 	if k.backoffCtor, err = conf.Config.GetCtor(); err != nil {
@@ -238,9 +250,14 @@ func (a *Kinesis) WriteWithContext(ctx context.Context, msg types.Message) error
 			for i, entry := range output.Records {
 				if entry.ErrorCode != nil {
 					failed = append(failed, input.Records[i])
-					if *entry.ErrorCode != kinesis.ErrCodeProvisionedThroughputExceededException && *entry.ErrorCode != kinesis.ErrCodeKMSThrottlingException {
+					switch *entry.ErrorCode {
+					case kinesis.ErrCodeProvisionedThroughputExceededException:
+						a.log.Errorf("Kinesis record write request rate too high, either the frequency or the size of the data exceeds your available throughput.")
+					case kinesis.ErrCodeKMSThrottlingException:
+						a.log.Errorf("Kinesis record write request throttling exception, the send traffic exceeds your request quota.")
+					default:
 						err = fmt.Errorf("record failed with code [%s] %s: %+v", *entry.ErrorCode, *entry.ErrorMessage, input.Records[i])
-						a.log.Errorf("kinesis record error: %v\n", err)
+						a.log.Errorf("kinesis record write error: %v\n", err)
 						return err
 					}
 				}

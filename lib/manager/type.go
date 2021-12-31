@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bundle"
 	imetrics "github.com/Jeffail/benthos/v3/internal/component/metrics"
 	"github.com/Jeffail/benthos/v3/internal/docs"
@@ -66,13 +67,8 @@ type Type struct {
 	resourceLock *sync.RWMutex
 
 	// Collections of component constructors
-	bufferBundle    *bundle.BufferSet
-	cacheBundle     *bundle.CacheSet
-	inputBundle     *bundle.InputSet
-	metricsBundle   *bundle.MetricsSet
-	outputBundle    *bundle.OutputSet
-	processorBundle *bundle.ProcessorSet
-	rateLimitBundle *bundle.RateLimitSet
+	env      *bundle.Environment
+	bloblEnv *bloblang.Environment
 
 	logger log.Modular
 	stats  *imetrics.Namespaced
@@ -90,9 +86,28 @@ func New(conf Config, apiReg APIReg, log log.Modular, stats metrics.Type) (*Type
 	return NewV2(ResourceConfig{Manager: conf}, apiReg, log, stats)
 }
 
+// OptFunc is an opt setting for a manager type.
+type OptFunc func(*Type)
+
+// OptSetEnvironment determines the environment from which the manager
+// initializes components and resources. This option is for internal use only.
+func OptSetEnvironment(e *bundle.Environment) OptFunc {
+	return func(t *Type) {
+		t.env = e
+	}
+}
+
+// OptSetBloblangEnvironment determines the environment from which the manager
+// parses bloblang functions and methods. This option is for internal use only.
+func OptSetBloblangEnvironment(env *bloblang.Environment) OptFunc {
+	return func(t *Type) {
+		t.bloblEnv = env
+	}
+}
+
 // NewV2 returns an instance of manager.Type, which can be shared amongst
 // components and logical threads of a Benthos service.
-func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Type) (*Type, error) {
+func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Type, opts ...OptFunc) (*Type, error) {
 	t := &Type{
 		apiReg: apiReg,
 
@@ -104,14 +119,9 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Ty
 		plugins:      map[string]interface{}{},
 		resourceLock: &sync.RWMutex{},
 
-		// All bundles default to everything that was imported.
-		bufferBundle:    bundle.AllBuffers,
-		cacheBundle:     bundle.AllCaches,
-		inputBundle:     bundle.AllInputs,
-		metricsBundle:   bundle.AllMetrics,
-		outputBundle:    bundle.AllOutputs,
-		processorBundle: bundle.AllProcessors,
-		rateLimitBundle: bundle.AllRateLimits,
+		// Environment defaults to global (everything that was imported).
+		env:      bundle.GlobalEnvironment,
+		bloblEnv: bloblang.GlobalEnvironment(),
 
 		logger: log,
 		stats:  imetrics.NewNamespaced(stats),
@@ -120,6 +130,10 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Ty
 		pipeLock: &sync.RWMutex{},
 
 		conditions: map[string]types.Condition{},
+	}
+
+	for _, opt := range opts {
+		opt(t)
 	}
 
 	conf, err := conf.collapsed()
@@ -157,8 +171,8 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Ty
 		t.plugins[k] = nil
 	}
 
-	for k, conf := range conf.Manager.Inputs {
-		if err := t.StoreInput(context.Background(), k, conf); err != nil {
+	for k, conf := range conf.Manager.RateLimits {
+		if err := t.StoreRateLimit(context.Background(), k, conf); err != nil {
 			return nil, err
 		}
 	}
@@ -190,8 +204,8 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Ty
 		}
 	}
 
-	for k, conf := range conf.Manager.RateLimits {
-		if err := t.StoreRateLimit(context.Background(), k, conf); err != nil {
+	for k, conf := range conf.Manager.Inputs {
+		if err := t.StoreInput(context.Background(), k, conf); err != nil {
 			return nil, err
 		}
 	}
@@ -222,16 +236,6 @@ func NewV2(conf ResourceConfig, apiReg APIReg, log log.Modular, stats metrics.Ty
 }
 
 //------------------------------------------------------------------------------
-
-func unwrapMetric(t metrics.Type) metrics.Type {
-	u, ok := t.(interface {
-		Unwrap() metrics.Type
-	})
-	if ok {
-		t = u.Unwrap()
-	}
-	return t
-}
 
 // ForStream returns a variant of this manager to be used by a particular stream
 // identifer, where APIs registered will be namespaced by that id.
@@ -285,7 +289,13 @@ func (t *Type) forChildComponent(id string) *Type {
 	if len(newT.component) > 0 {
 		id = newT.component + "." + id
 	}
-	newT.stats = t.stats.WithPrefix(id)
+
+	statsPrefix := id
+	if len(newT.stream) > 0 {
+		statsPrefix = newT.stream + "." + statsPrefix
+	}
+
+	newT.stats = t.stats.WithPrefix(statsPrefix)
 	newT.component = id
 	return &newT
 }
@@ -354,6 +364,25 @@ func (t *Type) Logger() log.Modular {
 	return t.logger
 }
 
+// Environment returns a bundle environment used by the manager. This is for
+// internal use only.
+func (t *Type) Environment() *bundle.Environment {
+	return t.env
+}
+
+// BloblEnvironment returns a Bloblang environment used by the manager. This is
+// for internal use only.
+func (t *Type) BloblEnvironment() *bloblang.Environment {
+	return t.bloblEnv
+}
+
+//------------------------------------------------------------------------------
+
+// GetDocs returns a documentation spec for an implementation of a component.
+func (t *Type) GetDocs(name string, ctype docs.Type) (docs.ComponentSpec, bool) {
+	return t.env.GetDocs(name, ctype)
+}
+
 //------------------------------------------------------------------------------
 
 func closeWithContext(ctx context.Context, c types.Closable) error {
@@ -374,7 +403,7 @@ func closeWithContext(ctx context.Context, c types.Closable) error {
 
 // NewBuffer attempts to create a new buffer component from a config.
 func (t *Type) NewBuffer(conf buffer.Config) (buffer.Type, error) {
-	return t.bufferBundle.Init(conf, t)
+	return t.env.BufferInit(conf, t)
 }
 
 //------------------------------------------------------------------------------
@@ -392,7 +421,7 @@ func (t *Type) AccessCache(ctx context.Context, name string, fn func(types.Cache
 	t.resourceLock.RLock()
 	defer t.resourceLock.RUnlock()
 	c, ok := t.caches[name]
-	if !ok {
+	if !ok || c == nil {
 		return ErrResourceNotFound(name)
 	}
 	fn(c)
@@ -404,12 +433,9 @@ func (t *Type) NewCache(conf cache.Config) (types.Cache, error) {
 	mgr := t
 	// A configured label overrides any previously set component label.
 	if len(conf.Label) > 0 && t.component != conf.Label {
-		if err := docs.ValidateLabel(conf.Label); err != nil {
-			return nil, err
-		}
 		mgr = t.forComponent(conf.Label)
 	}
-	return t.cacheBundle.Init(conf, mgr)
+	return t.env.CacheInit(conf, mgr)
 }
 
 // StoreCache attempts to store a new cache resource. If an existing resource
@@ -456,7 +482,7 @@ func (t *Type) AccessInput(ctx context.Context, name string, fn func(types.Input
 	t.resourceLock.RLock()
 	defer t.resourceLock.RUnlock()
 	i, ok := t.inputs[name]
-	if !ok {
+	if !ok || i == nil {
 		return ErrResourceNotFound(name)
 	}
 	fn(i)
@@ -470,12 +496,9 @@ func (t *Type) NewInput(conf input.Config, hasBatchProc bool, pipelines ...types
 	mgr := t
 	// A configured label overrides any previously set component label.
 	if len(conf.Label) > 0 && t.component != conf.Label {
-		if err := docs.ValidateLabel(conf.Label); err != nil {
-			return nil, err
-		}
 		mgr = t.forComponent(conf.Label)
 	}
-	return t.inputBundle.Init(hasBatchProc, conf, mgr, pipelines...)
+	return t.env.InputInit(hasBatchProc, conf, mgr, pipelines...)
 }
 
 // StoreInput attempts to store a new input resource. If an existing resource
@@ -527,7 +550,7 @@ func (t *Type) AccessProcessor(ctx context.Context, name string, fn func(types.P
 	t.resourceLock.RLock()
 	defer t.resourceLock.RUnlock()
 	p, ok := t.processors[name]
-	if !ok {
+	if !ok || p == nil {
 		return ErrResourceNotFound(name)
 	}
 	fn(p)
@@ -539,12 +562,9 @@ func (t *Type) NewProcessor(conf processor.Config) (types.Processor, error) {
 	mgr := t
 	// A configured label overrides any previously set component label.
 	if len(conf.Label) > 0 && t.component != conf.Label {
-		if err := docs.ValidateLabel(conf.Label); err != nil {
-			return nil, err
-		}
 		mgr = t.forComponent(conf.Label)
 	}
-	return t.processorBundle.Init(conf, mgr)
+	return t.env.ProcessorInit(conf, mgr)
 }
 
 // StoreProcessor attempts to store a new processor resource. If an existing
@@ -595,7 +615,7 @@ func (t *Type) AccessOutput(ctx context.Context, name string, fn func(types.Outp
 	t.resourceLock.RLock()
 	defer t.resourceLock.RUnlock()
 	o, ok := t.outputs[name]
-	if !ok {
+	if !ok || o == nil {
 		return ErrResourceNotFound(name)
 	}
 	fn(o)
@@ -607,12 +627,9 @@ func (t *Type) NewOutput(conf output.Config, pipelines ...types.PipelineConstruc
 	mgr := t
 	// A configured label overrides any previously set component label.
 	if len(conf.Label) > 0 && t.component != conf.Label {
-		if err := docs.ValidateLabel(conf.Label); err != nil {
-			return nil, err
-		}
 		mgr = t.forComponent(conf.Label)
 	}
-	return t.outputBundle.Init(conf, mgr, pipelines...)
+	return t.env.OutputInit(conf, mgr, pipelines...)
 }
 
 // StoreOutput attempts to store a new output resource. If an existing resource
@@ -667,7 +684,7 @@ func (t *Type) AccessRateLimit(ctx context.Context, name string, fn func(types.R
 	t.resourceLock.RLock()
 	defer t.resourceLock.RUnlock()
 	r, ok := t.rateLimits[name]
-	if !ok {
+	if !ok || r == nil {
 		return ErrResourceNotFound(name)
 	}
 	fn(r)
@@ -679,12 +696,9 @@ func (t *Type) NewRateLimit(conf ratelimit.Config) (types.RateLimit, error) {
 	mgr := t
 	// A configured label overrides any previously set component label.
 	if len(conf.Label) > 0 && t.component != conf.Label {
-		if err := docs.ValidateLabel(conf.Label); err != nil {
-			return nil, err
-		}
 		mgr = t.forComponent(conf.Label)
 	}
-	return t.rateLimitBundle.Init(conf, mgr)
+	return t.env.RateLimitInit(conf, mgr)
 }
 
 // StoreRateLimit attempts to store a new rate limit resource. If an existing
@@ -803,6 +817,17 @@ func (t *Type) WaitForClose(timeout time.Duration) error {
 
 // DEPRECATED
 // TODO: V4 Remove this
+
+// SwapMetrics attempts to swap the underlying metrics implementation of a
+// manager. This function does nothing if the manager type is not a *Type.
+func SwapMetrics(mgr types.Manager, stats metrics.Type) types.Manager {
+	if t, ok := mgr.(*Type); ok {
+		newMgr := *t
+		newMgr.stats = t.stats.WithStats(stats)
+		return &newMgr
+	}
+	return mgr
+}
 
 // GetInput attempts to find a service wide input by its name.
 func (t *Type) GetInput(name string) (types.Input, error) {

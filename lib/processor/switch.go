@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
@@ -40,27 +39,27 @@ When a switch processor executes on a [batch of messages](/docs/configuration/ba
 
 At the end of switch processing the resulting batch will follow the same ordering as the batch was received. If any child processors have split or otherwise grouped messages this grouping will be lost as the result of a switch is always a single batch. In order to perform conditional grouping and/or splitting use the [` + "`group_by`" + ` processor](/docs/components/processors/group_by/).`,
 		config: docs.FieldComponent().Array().WithChildren(
-			docs.FieldDeprecated("condition").HasType(docs.FieldCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
+			docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
 				m, ok := v.(map[string]interface{})
 				if !ok {
 					return "", false
 				}
 				return "field condition is deprecated in favour of check", m["type"] == "static" && m["static"] == true
 			}),
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"check",
 				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message should have the processors of this case executed on it. If left empty the case always passes. If the check mapping throws an error the message will be flagged [as having failed](/docs/configuration/error_handling) and will not be tested against any other cases.",
 				`this.type == "foo"`,
 				`this.contents.urls.contains("https://benthos.dev/")`,
-			).HasDefault("").Linter(docs.LintBloblangMapping),
+			).HasDefault(""),
 			docs.FieldCommon(
 				"processors",
 				"A list of [processors](/docs/components/processors/about/) to execute on a message.",
-			).HasDefault([]interface{}{}).Array().HasType(docs.FieldProcessor),
+			).HasDefault([]interface{}{}).Array().HasType(docs.FieldTypeProcessor),
 			docs.FieldAdvanced(
 				"fallthrough",
 				"Indicates whether, if this case passes for a message, the next case should also be executed.",
-			).HasDefault(false),
+			).HasDefault(false).HasType(docs.FieldTypeBool),
 		),
 		Examples: []docs.AnnotatedExample{
 			{
@@ -205,7 +204,7 @@ func NewSwitch(
 		var procs []types.Processor
 
 		if len(caseConf.Check) > 0 {
-			if check, err = bloblang.NewMapping("", caseConf.Check); err != nil {
+			if check, err = interop.NewBloblangMapping(mgr, caseConf.Check); err != nil {
 				return nil, fmt.Errorf("failed to parse case %v check: %w", i, err)
 			}
 		}
@@ -240,21 +239,20 @@ func NewSwitch(
 
 //------------------------------------------------------------------------------
 
-func reorderFromTags(tags []*imessage.Tag, parts []types.Part) {
-	sort.Slice(parts, func(i, j int) bool {
-		iFound, jFound := false, false
-		for _, t := range tags {
-			if !iFound && imessage.HasTag(t, parts[i]) {
-				iFound = true
-				i = t.Index
-			}
-			if !jFound && imessage.HasTag(t, parts[j]) {
-				jFound = true
-				j = t.Index
-			}
-			if iFound && jFound {
-				break
-			}
+func reorderFromGroup(group *imessage.SortGroup, parts []types.Part) {
+	partToIndex := map[types.Part]int{}
+	for _, p := range parts {
+		if i := group.GetIndex(p); i >= 0 {
+			partToIndex[p] = i
+		}
+	}
+
+	sort.SliceStable(parts, func(i, j int) bool {
+		if index, found := partToIndex[parts[i]]; found {
+			i = index
+		}
+		if index, found := partToIndex[parts[j]]; found {
+			j = index
 		}
 		return i < j
 	})
@@ -266,17 +264,13 @@ func (s *Switch) ProcessMessage(msg types.Message) (msgs []types.Message, res ty
 	s.mCount.Incr(1)
 
 	var result []types.Part
-
-	var tags []*imessage.Tag
 	var remaining []types.Part
 	var carryOver []types.Part
 
-	tags = make([]*imessage.Tag, msg.Len())
-	remaining = make([]types.Part, msg.Len())
-	msg.Iter(func(i int, p types.Part) error {
-		tag := imessage.NewTag(i)
-		tags[i] = tag
-		remaining[i] = imessage.WithTag(tag, p)
+	sortGroup, sortMsg := imessage.NewSortGroup(msg)
+	remaining = make([]types.Part, sortMsg.Len())
+	sortMsg.Iter(func(i int, p types.Part) error {
+		remaining[i] = p
 		return nil
 	})
 
@@ -334,7 +328,7 @@ func (s *Switch) ProcessMessage(msg types.Message) (msgs []types.Message, res ty
 
 	result = append(result, remaining...)
 	if len(result) > 1 {
-		reorderFromTags(tags, result)
+		reorderFromGroup(sortGroup, result)
 	}
 
 	resMsg := message.New(nil)

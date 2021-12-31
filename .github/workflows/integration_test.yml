@@ -6,13 +6,14 @@ on:
 
 jobs:
   integration-test:
+    if: ${{ github.repository == 'jeffail/benthos' || github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     steps:
 
     - name: Install Go
       uses: actions/setup-go@v2
       with:
-        go-version: 1.16.x
+        go-version: 1.17.x
 
     - name: Checkout code
       uses: actions/checkout@v2

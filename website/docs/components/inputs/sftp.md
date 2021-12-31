@@ -15,8 +15,9 @@ categories: ["Network"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Consumes files from a server over SFTP.
 
 Introduced in version 3.39.0.
@@ -38,6 +39,8 @@ input:
     credentials:
       username: ""
       password: ""
+      private_key_file: ""
+      private_key_pass: ""
     paths: []
     codec: all-bytes
     watcher:
@@ -59,6 +62,8 @@ input:
     credentials:
       username: ""
       password: ""
+      private_key_file: ""
+      private_key_pass: ""
     paths: []
     codec: all-bytes
     delete_on_finish: false
@@ -116,6 +121,22 @@ The password for the username to connect to the SFTP server.
 Type: `string`  
 Default: `""`  
 
+### `credentials.private_key_file`
+
+The private key for the username to connect to the SFTP server.
+
+
+Type: `string`  
+Default: `""`  
+
+### `credentials.private_key_pass`
+
+Optional passphrase for private key.
+
+
+Type: `string`  
+Default: `""`  
+
 ### `paths`
 
 A list of paths to consume sequentially. Glob patterns are supported.
@@ -138,6 +159,7 @@ Default: `"all-bytes"`
 | `all-bytes` | Consume the entire file as a single binary message. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
+| `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `csv:|` would consume a pipe delimited file. |
 | `delim:x` | Consume the file in segments divided by a custom delimiter. |
 | `gzip` | Decompress a gzip file, this codec should precede another codec, e.g. `gzip/all-bytes`, `gzip/tar`, `gzip/csv`, etc. |
 | `lines` | Consume the file in segments divided by linebreaks. |

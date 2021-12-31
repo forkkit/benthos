@@ -21,7 +21,7 @@ DATE      := $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 VER_FLAGS = -X github.com/Jeffail/benthos/v3/lib/service.Version=$(VERSION) \
 	-X github.com/Jeffail/benthos/v3/lib/service.DateBuilt=$(DATE)
 
-LD_FLAGS   =
+LD_FLAGS   = -w -s
 GO_FLAGS   =
 DOCS_FLAGS =
 
@@ -29,23 +29,24 @@ APPS = benthos
 all: $(APPS)
 
 install: $(APPS)
+	@rm -f $(INSTALL_DIR)/benthos
 	@cp $(PATHINSTBIN)/* $(INSTALL_DIR)/
 
 deps:
 	@go mod tidy
-	@go mod vendor
 
-SOURCE_FILES = $(shell find lib internal public cmd -type f -name "*.go")
+SOURCE_FILES = $(shell find lib internal public cmd -type f)
+TEMPLATE_FILES = $(shell find template -path template/test -prune -o -type f -name "*.yaml")
 
-$(PATHINSTBIN)/%: $(SOURCE_FILES)
+$(PATHINSTBIN)/%: $(SOURCE_FILES) $(TEMPLATE_FILES)
 	@go build $(GO_FLAGS) -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/$*
 
 $(APPS): %: $(PATHINSTBIN)/%
 
-TOOLS = benthos_config_gen benthos_docs_gen
+TOOLS = benthos_docs_gen
 tools: $(TOOLS)
 
-$(PATHINSTTOOLS)/%: $(SOURCE_FILES)
+$(PATHINSTTOOLS)/%: $(SOURCE_FILES) $(TEMPLATE_FILES)
 	@go build $(GO_FLAGS) -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/tools/$*
 
 $(TOOLS): %: $(PATHINSTTOOLS)/%
@@ -53,7 +54,7 @@ $(TOOLS): %: $(PATHINSTTOOLS)/%
 SERVERLESS = benthos-lambda
 serverless: $(SERVERLESS)
 
-$(PATHINSTSERVERLESS)/%: $(SOURCE_FILES)
+$(PATHINSTSERVERLESS)/%: $(SOURCE_FILES) $(TEMPLATE_FILES)
 	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build $(GO_FLAGS) -tags "$(TAGS)" -ldflags "$(LD_FLAGS) $(VER_FLAGS)" -o $@ ./cmd/serverless/$*
 	@zip -m -j $@.zip $@
@@ -69,11 +70,11 @@ docker-rc-tags:
 docker-cgo-tags:
 	@echo "latest-cgo,$(VER_CUT)-cgo,$(VER_MAJOR).$(VER_MINOR)-cgo,$(VER_MAJOR)-cgo" > .tags
 
-docker: deps
+docker:
 	@docker build -f ./resources/docker/Dockerfile . -t jeffail/benthos:$(VER_CUT)
 	@docker tag jeffail/benthos:$(VER_CUT) jeffail/benthos:latest
 
-docker-cgo: deps
+docker-cgo:
 	@docker build -f ./resources/docker/Dockerfile.cgo . -t jeffail/benthos:$(VER_CUT)-cgo
 	@docker tag jeffail/benthos:$(VER_CUT)-cgo jeffail/benthos:latest-cgo
 
@@ -86,11 +87,12 @@ lint:
 	@golangci-lint run --timeout 5m cmd/... lib/... internal/... public/...
 
 test: $(APPS)
-	@go test $(GO_FLAGS) -timeout 3m -race ./...
+	@go test $(GO_FLAGS) -ldflags "$(LD_FLAGS)" -timeout 3m -race ./...
 	@$(PATHINSTBIN)/benthos test ./config/test/...
 
 test-integration:
-	@go test $(GO_FLAGS) -run "^Test.*Integration$$" -timeout 3m ./...
+	$(warning WARNING! Running the integration tests in their entirety consumes a huge amount of computing resources and is likely to time out on most machines. It's recommended that you instead run the integration suite for connectors you are working selectively with `go test -run 'TestIntegration/kafka' ./...` and so on.)
+	@go test $(GO_FLAGS) -ldflags "$(LD_FLAGS)" -run "^Test.*Integration.*$$" -timeout 3m ./...
 
 clean:
 	rm -rf $(PATHINSTBIN)
@@ -100,7 +102,6 @@ clean:
 	rm -rf $(PATHINSTDOCKER)
 
 docs: $(APPS) $(TOOLS)
-	@$(PATHINSTTOOLS)/benthos_config_gen $(DOCS_FLAGS)
 	@$(PATHINSTTOOLS)/benthos_docs_gen $(DOCS_FLAGS)
 	@$(PATHINSTBIN)/benthos lint ./config/... \
 		$(WEBSITE_DIR)/cookbooks/*.md \

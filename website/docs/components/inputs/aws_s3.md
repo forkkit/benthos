@@ -93,7 +93,7 @@ When downloading large files it's often necessary to process it in streamed part
 
 ## Credentials
 
-By default Benthos will use a shared credentials file when connecting to AWS services. It's also possible to set them explicitly at the component level, allowing you to transfer data across accounts. You can find out more [in this document](/docs/guides/aws).
+By default Benthos will use a shared credentials file when connecting to AWS services. It's also possible to set them explicitly at the component level, allowing you to transfer data across accounts. You can find out more [in this document](/docs/guides/cloud/aws).
 
 ## Metadata
 
@@ -109,7 +109,7 @@ This input adds the following metadata fields to each message:
 - All user defined metadata
 ```
 
-You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).
+You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata). Note that user defined metadata is case insensitive within AWS, and it is likely that the keys will be received in a capitalized form, if you wish to make them consistent you can map all metadata keys to lower or uppercase using a Bloblang mapping such as `meta = meta().map_each_key(key -> key.lowercase())`.
 
 ## Fields
 
@@ -147,7 +147,7 @@ Default: `""`
 
 ### `credentials`
 
-Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/aws).
+Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws).
 
 
 Type: `object`  
@@ -230,6 +230,7 @@ Default: `"all-bytes"`
 | `all-bytes` | Consume the entire file as a single binary message. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
+| `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `csv:|` would consume a pipe delimited file. |
 | `delim:x` | Consume the file in segments divided by a custom delimiter. |
 | `gzip` | Decompress a gzip file, this codec should precede another codec, e.g. `gzip/all-bytes`, `gzip/tar`, `gzip/csv`, etc. |
 | `lines` | Consume the file in segments divided by linebreaks. |

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/component/output"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
@@ -39,7 +40,7 @@ Regular Benthos outputs will apply back pressure when downstream services aren't
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("error", "Whether messages should be dropped when the child output returns an error. For example, this could be when an http_client output gets a 4XX response code."),
 			docs.FieldCommon("back_pressure", "An optional duration string that determines the maximum length of time to wait for a given message to be accepted by the child output before the message should be dropped instead. The most common reason for an output to block is when waiting for a lost connection to be re-established. Once a message has been dropped due to back pressure all subsequent messages are dropped immediately until the output is ready to process them again. Note that if `error` is set to `false` and this field is specified then messages dropped due to back pressure will return an error response.", "30s", "1m"),
-			docs.FieldCommon("output", "A child output.").HasType(docs.FieldOutput),
+			docs.FieldCommon("output", "A child output.").HasType(docs.FieldTypeOutput),
 		},
 		Examples: []docs.AnnotatedExample{
 			{
@@ -191,9 +192,7 @@ func (d *dropOn) loop() {
 	defer func() {
 		close(d.transactionsOut)
 		d.wrapped.CloseAsync()
-		err := d.wrapped.WaitForClose(time.Second)
-		for ; err != nil; err = d.wrapped.WaitForClose(time.Second) {
-		}
+		_ = d.wrapped.WaitForClose(shutdown.MaximumShutdownWait())
 		close(d.closedChan)
 	}()
 

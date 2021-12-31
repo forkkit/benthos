@@ -38,7 +38,7 @@ Yep, we got 'em. Benthos implements transaction based resiliency with back press
 
 ## Supported Sources & Sinks
 
-Apache Pulsar, AWS (DynamoDB, Kinesis, S3, SQS, SNS), Azure (Blob storage, Queue storage, Table storage), Cassandra, Elasticsearch, File, GCP (Pub/Sub, Cloud storage), HDFS, HTTP (server and client, including websockets), Kafka, Memcached, MQTT, Nanomsg, NATS, NATS JetStream, NATS Streaming, NSQ, AMQP 0.91 (RabbitMQ), AMQP 1, Redis (streams, list, pubsub, hashes), MongoDB, SQL (MySQL, PostgreSQL, Clickhouse), Stdin/Stdout, TCP & UDP, sockets and ZMQ4.
+Apache Pulsar, AWS (DynamoDB, Kinesis, S3, SQS, SNS), Azure (Blob storage, Queue storage, Table storage), Cassandra, Elasticsearch, File, GCP (Pub/Sub, Cloud storage), HDFS, HTTP (server and client, including websockets), Kafka, Memcached, MQTT, Nanomsg, NATS, NATS JetStream, NATS Streaming, NSQ, AMQP 0.91 (RabbitMQ), AMQP 1, Redis (streams, list, pubsub, hashes), MongoDB, SQL (MySQL, PostgreSQL, Clickhouse, MSSQL), Stdin/Stdout, TCP & UDP, sockets and ZMQ4.
 
 Connectors are being added constantly, if something you want is missing then [open an issue](https://github.com/Jeffail/benthos/issues/new).
 
@@ -48,7 +48,7 @@ If you want to dive fully into Benthos then don't waste your time in this dump, 
 
 For guidance on how to configure more advanced stream processing concepts such as stream joins, enrichment workflows, etc, check out the [cookbooks section.][cookbooks]
 
-For guidance on building your own custom plugins check out [this example repo.][plugin-repo]
+For guidance on building your own custom plugins in Go check out [the public APIs.][godoc-url]
 
 ## Install
 
@@ -81,17 +81,15 @@ benthos -c ./config.yaml
 Or, with docker:
 
 ```shell
-# Send HTTP /POST data to Kafka:
-docker run --rm \
-	-e "INPUT_TYPE=http_server" \
-	-e "OUTPUT_TYPE=kafka" \
-	-e "OUTPUT_KAFKA_ADDRESSES=kafka-server:9092" \
-	-e "OUTPUT_KAFKA_TOPIC=benthos_topic" \
-	-p 4195:4195 \
-	jeffail/benthos
-
-# Using your own config file:
+# Using a config file
 docker run --rm -v /path/to/your/config.yaml:/benthos.yaml jeffail/benthos
+
+# Using a series of -s flags
+docker run --rm -p 4195:4195 jeffail/benthos \
+  -s "input.type=http_server" \
+  -s "output.type=kafka" \
+  -s "output.kafka.addresses=kafka-server:9092" \
+  -s "output.kafka.topic=benthos_topic"
 ```
 
 ## Monitoring
@@ -104,23 +102,19 @@ Benthos serves two HTTP endpoints for health checks:
 
 ### Metrics
 
-Benthos [exposes lots of metrics][metrics] either to Statsd, Prometheus or for debugging purposes an HTTP endpoint that returns a JSON formatted object. The target can be specified [via config][metrics-config].
+Benthos [exposes lots of metrics][metrics] either to Statsd, Prometheus or for debugging purposes an HTTP endpoint that returns a JSON formatted object.
 
 ### Tracing
 
-Benthos also [emits opentracing events][tracers] to a tracer of your choice (currently only [Jaeger][jaeger] is supported) which can be used to visualise the processors within a pipeline.
+Benthos also [emits tracing events][tracers] to a tracer of your choice (currently only [Jaeger][jaeger] is supported) which can be used to visualise the processors within a pipeline.
 
 ## Configuration
 
 Benthos provides lots of tools for making configuration discovery, debugging and organisation easy. You can [read about them here][config-doc].
 
-### Environment Variables
-
-It is possible to select fields inside a configuration file to be set via [environment variables][config-interp]. The docker image, for example, is built with [a config file][env-config] where _all_ common fields can be set this way.
-
 ## Build
 
-Build with Go (1.15 or later):
+Build with Go (1.16 or later):
 
 ```shell
 git clone git@github.com:Jeffail/benthos
@@ -133,14 +127,14 @@ make
 Benthos uses [golangci-lint][golangci-lint] for linting, which you can install with:
 
 ```shell
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.35.2
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin
 ```
 
 And then run it with `make lint`.
 
 ### Plugins
 
-It's pretty easy to write your own custom plugins for Benthos, take a look at [this repo][plugin-repo] for examples and build instructions.
+It's pretty easy to write your own custom plugins for Benthos in Go, for information check out [the API docs][godoc-url], and for inspiration there's an [example repo][plugin-repo] demonstrating a variety of plugin implementations.
 
 ### Docker Builds
 
@@ -159,8 +153,6 @@ docker run --rm \
 	-p 4195:4195 \
 	benthos -c /config.yaml
 ```
-
-There are a [few examples here][compose-examples] that show you some ways of setting up Benthos containers using `docker-compose`.
 
 ### ZMQ4 Support
 
@@ -185,13 +177,10 @@ Contributions are welcome, please [read the guidelines](CONTRIBUTING.md), come a
 [outputs]: https://www.benthos.dev/docs/components/outputs/about
 [metrics]: https://www.benthos.dev/docs/components/metrics/about
 [tracers]: https://www.benthos.dev/docs/components/tracers/about
-[metrics-config]: config/metrics
 [config-interp]: https://www.benthos.dev/docs/configuration/interpolation
-[compose-examples]: resources/docker/compose_examples
 [streams-api]: https://www.benthos.dev/docs/guides/streams_mode/streams_api
 [streams-mode]: https://www.benthos.dev/docs/guides/streams_mode/about
 [general-docs]: https://www.benthos.dev/docs/about
-[env-config]: config/env/README.md
 [bloblang-about]: https://www.benthos.dev/docs/guides/bloblang/about
 [config-doc]: https://www.benthos.dev/docs/configuration/about
 [serverless]: https://www.benthos.dev/docs/guides/serverless/about

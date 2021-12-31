@@ -10,11 +10,10 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
-	"github.com/opentracing/opentracing-go"
 	"github.com/quipo/dependencysolver"
 )
 
@@ -90,9 +89,14 @@ process_dag:
 With this config the DAG would determine that the children foo and bar can be
 executed in parallel, and once they are both finished we may proceed onto baz.`,
 		config: docs.FieldComponent().Map().WithChildren(
+			docs.FieldDeprecated("dependencies"),
+			docs.FieldDeprecated("conditions"),
+			docs.FieldDeprecated("parts"),
 			docs.FieldDeprecated("premap"),
-			docs.FieldDeprecated("processors").Array().HasType(docs.FieldProcessor),
+			docs.FieldDeprecated("premap_optional"),
+			docs.FieldDeprecated("processors").Array().HasType(docs.FieldTypeProcessor),
 			docs.FieldDeprecated("postmap"),
+			docs.FieldDeprecated("postmap_optional"),
 		),
 	}
 }
@@ -253,7 +257,7 @@ func (p *ProcessDAG) ProcessMessage(msg types.Message) ([]types.Message, types.R
 		wg.Add(len(layer))
 		for i, eid := range layer {
 			go func(id string, index int) {
-				var resSpans []opentracing.Span
+				var resSpans []*tracing.Span
 				results[index], resSpans = tracing.WithChildSpans(id, propMsg.Copy())
 				errors[index] = p.children[id].CreateResult(results[index])
 				for _, s := range resSpans {

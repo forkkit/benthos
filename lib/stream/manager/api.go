@@ -1,25 +1,31 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/internal/bundle"
+	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/lib/buffer"
-	"github.com/Jeffail/benthos/v3/lib/config"
+	"github.com/Jeffail/benthos/v3/lib/cache"
 	"github.com/Jeffail/benthos/v3/lib/input"
 	"github.com/Jeffail/benthos/v3/lib/output"
 	"github.com/Jeffail/benthos/v3/lib/pipeline"
+	"github.com/Jeffail/benthos/v3/lib/processor"
+	"github.com/Jeffail/benthos/v3/lib/ratelimit"
 	"github.com/Jeffail/benthos/v3/lib/stream"
 	"github.com/Jeffail/benthos/v3/lib/util/text"
 	"github.com/Jeffail/gabs/v2"
 	"github.com/gorilla/mux"
-	yaml "gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v3"
 )
 
 //------------------------------------------------------------------------------
@@ -41,14 +47,47 @@ func (m *Type) registerEndpoints() {
 	)
 	m.manager.RegisterEndpoint(
 		"/streams/{id}/stats",
-		"GET a list of metrics for the stream.",
+		"GET a structured JSON object containing metrics for the stream.",
 		m.HandleStreamStats,
+	)
+	m.manager.RegisterEndpoint(
+		"/resources/{type}/{id}",
+		"POST: Create or replace a given resource configuration of a specified type. Types supported are `cache`, `input`, `output`, `processor` and `rate_limit`.",
+		m.HandleResourceCRUD,
 	)
 	m.manager.RegisterEndpoint(
 		"/ready",
 		"Returns 200 OK if the inputs and outputs of all running streams are connected, otherwise a 503 is returned. If there are no active streams 200 is returned.",
 		m.HandleStreamReady,
 	)
+}
+
+// ConfigSet is a map of stream configurations mapped by ID, which can be YAML
+// parsed without losing default values inside the stream configs.
+type ConfigSet map[string]stream.Config
+
+// UnmarshalYAML ensures that when parsing configs that are in a map or slice
+// the default values are still applied.
+func (c ConfigSet) UnmarshalYAML(value *yaml.Node) error {
+	tmpSet := map[string]yaml.Node{}
+	if err := value.Decode(&tmpSet); err != nil {
+		return err
+	}
+	for k, v := range tmpSet {
+		conf := stream.NewConfig()
+		if err := v.Decode(&conf); err != nil {
+			return err
+		}
+		c[k] = conf
+	}
+	return nil
+}
+
+func lintStreamConfigNode(node *yaml.Node) (lints []string) {
+	for _, dLint := range stream.Spec().LintYAML(docs.NewLintContext(), node) {
+		lints = append(lints, fmt.Sprintf("line %v: %v", dLint.Line, dLint.What))
+	}
+	return
 }
 
 // HandleStreamsCRUD is an http.HandleFunc for returning maps of active benthos
@@ -63,10 +102,12 @@ func (m *Type) HandleStreamsCRUD(w http.ResponseWriter, r *http.Request) {
 		if serverErr != nil {
 			m.logger.Errorf("Streams CRUD Error: %v\n", serverErr)
 			http.Error(w, fmt.Sprintf("Error: %v", serverErr), http.StatusBadGateway)
+			return
 		}
 		if requestErr != nil {
 			m.logger.Debugf("Streams request CRUD Error: %v\n", requestErr)
 			http.Error(w, fmt.Sprintf("Error: %v", requestErr), http.StatusBadRequest)
+			return
 		}
 	}()
 
@@ -101,12 +142,38 @@ func (m *Type) HandleStreamsCRUD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newSet := ConfigSet{}
-
 	var setBytes []byte
-	if setBytes, requestErr = ioutil.ReadAll(r.Body); requestErr != nil {
+	if setBytes, requestErr = io.ReadAll(r.Body); requestErr != nil {
 		return
 	}
+
+	if r.URL.Query().Get("chilled") != "true" {
+		nodeSet := map[string]yaml.Node{}
+		if requestErr = yaml.Unmarshal(setBytes, &nodeSet); requestErr != nil {
+			return
+		}
+		var lints []string
+		for k, n := range nodeSet {
+			for _, l := range lintStreamConfigNode(&n) {
+				keyLint := fmt.Sprintf("stream '%v': %v", k, l)
+				lints = append(lints, keyLint)
+				m.logger.Debugf("Streams request linting error: %v\n", keyLint)
+			}
+		}
+		if len(lints) > 0 {
+			sort.Strings(lints)
+			errBytes, _ := json.Marshal(struct {
+				LintErrs []string `json:"lint_errors"`
+			}{
+				LintErrs: lints,
+			})
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(errBytes)
+			return
+		}
+	}
+
+	newSet := ConfigSet{}
 	if requestErr = yaml.Unmarshal(setBytes, &newSet); requestErr != nil {
 		return
 	}
@@ -202,10 +269,12 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 		if serverErr != nil {
 			m.logger.Errorf("Streams CRUD Error: %v\n", serverErr)
 			http.Error(w, fmt.Sprintf("Error: %v", serverErr), http.StatusBadGateway)
+			return
 		}
 		if requestErr != nil {
 			m.logger.Debugf("Streams request CRUD Error: %v\n", requestErr)
 			http.Error(w, fmt.Sprintf("Error: %v", requestErr), http.StatusBadRequest)
+			return
 		}
 	}()
 
@@ -215,29 +284,31 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	readConfig := func() (confOut stream.Config, err error) {
+	readConfig := func() (confOut stream.Config, lints []string, err error) {
 		var confBytes []byte
-		if confBytes, err = ioutil.ReadAll(r.Body); err != nil {
+		if confBytes, err = io.ReadAll(r.Body); err != nil {
 			return
 		}
+		confBytes = text.ReplaceEnvVariables(confBytes)
 
-		confOut = stream.NewConfig()
-		err = yaml.Unmarshal(text.ReplaceEnvVariables(confBytes), &confOut)
-		if err == nil {
-			lConfig := config.New()
-			lConfig.Config = confOut
-			if lints, lintErr := config.Lint(confBytes, lConfig); lintErr == nil {
-				for _, lint := range lints {
-					m.logger.Infof("Stream '%v' config: %v\n", id, lint)
-				}
+		if r.URL.Query().Get("chilled") != "true" {
+			var node yaml.Node
+			if err = yaml.Unmarshal(confBytes, &node); err != nil {
+				return
+			}
+			lints = lintStreamConfigNode(&node)
+			for _, l := range lints {
+				m.logger.Infof("Stream '%v' config: %v\n", id, l)
 			}
 		}
 
+		confOut = stream.NewConfig()
+		err = yaml.Unmarshal(confBytes, &confOut)
 		return
 	}
 	patchConfig := func(confIn stream.Config) (confOut stream.Config, err error) {
 		var patchBytes []byte
-		if patchBytes, err = ioutil.ReadAll(r.Body); err != nil {
+		if patchBytes, err = io.ReadAll(r.Body); err != nil {
 			return
 		}
 
@@ -275,9 +346,20 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var conf stream.Config
+	var lints []string
 	switch r.Method {
 	case "POST":
-		if conf, requestErr = readConfig(); requestErr != nil {
+		if conf, lints, requestErr = readConfig(); requestErr != nil {
+			return
+		}
+		if len(lints) > 0 {
+			errBytes, _ := json.Marshal(struct {
+				LintErrs []string `json:"lint_errors"`
+			}{
+				LintErrs: lints,
+			})
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(errBytes)
 			return
 		}
 		serverErr = m.Create(id, conf)
@@ -305,7 +387,17 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 			w.Write(bodyBytes)
 		}
 	case "PUT":
-		if conf, requestErr = readConfig(); requestErr != nil {
+		if conf, lints, requestErr = readConfig(); requestErr != nil {
+			return
+		}
+		if len(lints) > 0 {
+			errBytes, _ := json.Marshal(struct {
+				LintErrs []string `json:"lint_errors"`
+			}{
+				LintErrs: lints,
+			})
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(errBytes)
 			return
 		}
 		serverErr = m.Update(id, conf, time.Until(deadline))
@@ -326,11 +418,138 @@ func (m *Type) HandleStreamCRUD(w http.ResponseWriter, r *http.Request) {
 	if serverErr == ErrStreamDoesNotExist {
 		serverErr = nil
 		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
 	}
 	if serverErr == ErrStreamExists {
 		serverErr = nil
 		http.Error(w, "Stream already exists", http.StatusBadRequest)
+		return
 	}
+}
+
+// HandleResourceCRUD is an http.HandleFunc for performing CRUD operations on
+// resource components.
+func (m *Type) HandleResourceCRUD(w http.ResponseWriter, r *http.Request) {
+	var serverErr, requestErr error
+	defer func() {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+		if serverErr != nil {
+			m.logger.Errorf("Resource CRUD Error: %v\n", serverErr)
+			http.Error(w, fmt.Sprintf("Error: %v", serverErr), http.StatusBadGateway)
+			return
+		}
+		if requestErr != nil {
+			m.logger.Debugf("Resource request CRUD Error: %v\n", requestErr)
+			http.Error(w, fmt.Sprintf("Error: %v", requestErr), http.StatusBadRequest)
+			return
+		}
+	}()
+
+	if r.Method != "POST" {
+		requestErr = fmt.Errorf("verb not supported: %v", r.Method)
+		return
+	}
+
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "Var `id` must be set", http.StatusBadRequest)
+		return
+	}
+
+	newMgr, ok := m.manager.(bundle.NewManagement)
+	if !ok {
+		serverErr = errors.New("server does not support resource CRUD operations")
+		return
+	}
+
+	ctx, done := context.WithDeadline(r.Context(), time.Now().Add(m.apiTimeout))
+	defer done()
+
+	var storeFn func(*yaml.Node)
+
+	docType := docs.Type(mux.Vars(r)["type"])
+	switch docType {
+	case docs.TypeCache:
+		storeFn = func(n *yaml.Node) {
+			cacheConf := cache.NewConfig()
+			if requestErr = n.Decode(&cacheConf); requestErr != nil {
+				return
+			}
+			serverErr = newMgr.StoreCache(ctx, id, cacheConf)
+		}
+	case docs.TypeInput:
+		storeFn = func(n *yaml.Node) {
+			inputConf := input.NewConfig()
+			if requestErr = n.Decode(&inputConf); requestErr != nil {
+				return
+			}
+			serverErr = newMgr.StoreInput(ctx, id, inputConf)
+		}
+	case docs.TypeOutput:
+		storeFn = func(n *yaml.Node) {
+			outputConf := output.NewConfig()
+			if requestErr = n.Decode(&outputConf); requestErr != nil {
+				return
+			}
+			serverErr = newMgr.StoreOutput(ctx, id, outputConf)
+		}
+	case docs.TypeProcessor:
+		storeFn = func(n *yaml.Node) {
+			procConf := processor.NewConfig()
+			if requestErr = n.Decode(&procConf); requestErr != nil {
+				return
+			}
+			serverErr = newMgr.StoreProcessor(ctx, id, procConf)
+		}
+	case docs.TypeRateLimit:
+		storeFn = func(n *yaml.Node) {
+			rlConf := ratelimit.NewConfig()
+			if requestErr = n.Decode(&rlConf); requestErr != nil {
+				return
+			}
+			serverErr = newMgr.StoreRateLimit(ctx, id, rlConf)
+		}
+	default:
+		http.Error(w, "Var `type` must be set to one of `cache`, `input`, `output`, `processor` or `rate_limit`", http.StatusBadRequest)
+		return
+	}
+
+	var confNode *yaml.Node
+	var lints []string
+	{
+		var confBytes []byte
+		if confBytes, requestErr = io.ReadAll(r.Body); requestErr != nil {
+			return
+		}
+		confBytes = text.ReplaceEnvVariables(confBytes)
+
+		var node yaml.Node
+		if requestErr = yaml.Unmarshal(confBytes, &node); requestErr != nil {
+			return
+		}
+		confNode = &node
+
+		if r.URL.Query().Get("chilled") != "true" {
+			for _, l := range docs.LintYAML(docs.NewLintContext(), docType, &node) {
+				lints = append(lints, fmt.Sprintf("line %v: %v", l.Line, l.What))
+				m.logger.Infof("Resource '%v' config: %v\n", id, l)
+			}
+		}
+	}
+	if len(lints) > 0 {
+		errBytes, _ := json.Marshal(struct {
+			LintErrs []string `json:"lint_errors"`
+		}{
+			LintErrs: lints,
+		})
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(errBytes)
+		return
+	}
+
+	storeFn(confNode)
 }
 
 // HandleStreamStats is an http.HandleFunc for obtaining metrics for a stream.
@@ -343,10 +562,12 @@ func (m *Type) HandleStreamStats(w http.ResponseWriter, r *http.Request) {
 		if serverErr != nil {
 			m.logger.Errorf("Stream stats Error: %v\n", serverErr)
 			http.Error(w, fmt.Sprintf("Error: %v", serverErr), http.StatusBadGateway)
+			return
 		}
 		if requestErr != nil {
 			m.logger.Debugf("Stream request stats Error: %v\n", requestErr)
 			http.Error(w, fmt.Sprintf("Error: %v", requestErr), http.StatusBadRequest)
+			return
 		}
 	}()
 
@@ -366,13 +587,15 @@ func (m *Type) HandleStreamStats(w http.ResponseWriter, r *http.Request) {
 
 			obj := gabs.New()
 			for k, v := range counters {
+				k = strings.TrimPrefix(k, id+".")
 				obj.SetP(v, k)
 			}
 			for k, v := range timings {
+				k = strings.TrimPrefix(k, id+".")
 				obj.SetP(v, k)
 				obj.SetP(time.Duration(v).String(), k+"_readable")
 			}
-			obj.SetP(fmt.Sprintf("%v", uptime), "uptime")
+			obj.SetP(uptime, "uptime")
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(obj.Bytes())
 		}
@@ -382,6 +605,7 @@ func (m *Type) HandleStreamStats(w http.ResponseWriter, r *http.Request) {
 	if serverErr == ErrStreamDoesNotExist {
 		serverErr = nil
 		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
 	}
 }
 
@@ -404,7 +628,7 @@ func (m *Type) HandleStreamReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusServiceUnavailable)
-	w.Write([]byte(fmt.Sprintf("streams %v are not connected\n", strings.Join(notReady, ", "))))
+	fmt.Fprintf(w, "streams %v are not connected\n", strings.Join(notReady, ", "))
 }
 
 //------------------------------------------------------------------------------

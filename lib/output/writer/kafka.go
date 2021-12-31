@@ -4,14 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	batchInternal "github.com/Jeffail/benthos/v3/internal/batch"
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/component/output"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message/batch"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -30,8 +31,10 @@ import (
 type KafkaConfig struct {
 	Addresses        []string    `json:"addresses" yaml:"addresses"`
 	ClientID         string      `json:"client_id" yaml:"client_id"`
+	RackID           string      `json:"rack_id" yaml:"rack_id"`
 	Key              string      `json:"key" yaml:"key"`
 	Partitioner      string      `json:"partitioner" yaml:"partitioner"`
+	Partition        string      `json:"partition" yaml:"partition"`
 	Topic            string      `json:"topic" yaml:"topic"`
 	Compression      string      `json:"compression" yaml:"compression"`
 	MaxMsgBytes      int         `json:"max_msg_bytes" yaml:"max_msg_bytes"`
@@ -62,9 +65,11 @@ func NewKafkaConfig() KafkaConfig {
 	return KafkaConfig{
 		Addresses:            []string{"localhost:9092"},
 		ClientID:             "benthos_kafka_output",
+		RackID:               "",
 		Key:                  "",
 		RoundRobinPartitions: false,
 		Partitioner:          "fnv1a_hash",
+		Partition:            "",
 		Topic:                "benthos_stream",
 		Compression:          "none",
 		MaxMsgBytes:          1000000,
@@ -99,8 +104,9 @@ type Kafka struct {
 	version   sarama.KafkaVersion
 	conf      KafkaConfig
 
-	key   *field.Expression
-	topic *field.Expression
+	key       *field.Expression
+	topic     *field.Expression
+	partition *field.Expression
 
 	producer    sarama.SyncProducer
 	compression sarama.CompressionCodec
@@ -124,6 +130,13 @@ func NewKafka(conf KafkaConfig, mgr types.Manager, log log.Modular, stats metric
 		conf.Partitioner = "round_robin"
 		log.Warnln("The field 'round_robin_partitions' is deprecated, please use the 'partitioner' field (set to 'round_robin') instead.")
 	}
+
+	if conf.Partition == "" && conf.Partitioner == "manual" {
+		return nil, fmt.Errorf("partition field required for 'manual' partitioner")
+	} else if len(conf.Partition) > 0 && conf.Partitioner != "manual" {
+		return nil, fmt.Errorf("partition field can only be specified for 'manual' partitioner")
+	}
+
 	partitioner, err := strToPartitioner(conf.Partitioner)
 	if err != nil {
 		return nil, err
@@ -144,11 +157,14 @@ func NewKafka(conf KafkaConfig, mgr types.Manager, log log.Modular, stats metric
 		return nil, fmt.Errorf("failed to construct metadata filter: %w", err)
 	}
 
-	if k.key, err = bloblang.NewField(conf.Key); err != nil {
+	if k.key, err = interop.NewBloblangField(mgr, conf.Key); err != nil {
 		return nil, fmt.Errorf("failed to parse key expression: %v", err)
 	}
-	if k.topic, err = bloblang.NewField(conf.Topic); err != nil {
+	if k.topic, err = interop.NewBloblangField(mgr, conf.Topic); err != nil {
 		return nil, fmt.Errorf("failed to parse topic expression: %v", err)
+	}
+	if k.partition, err = interop.NewBloblangField(mgr, conf.Partition); err != nil {
+		return nil, fmt.Errorf("failed to parse parition expression: %v", err)
 	}
 	if k.backoffCtor, err = conf.Config.GetCtor(); err != nil {
 		return nil, err
@@ -195,6 +211,8 @@ func strToCompressionCodec(str string) (sarama.CompressionCodec, error) {
 		return sarama.CompressionLZ4, nil
 	case "gzip":
 		return sarama.CompressionGZIP, nil
+	case "zstd":
+		return sarama.CompressionZSTD, nil
 	}
 	return sarama.CompressionNone, fmt.Errorf("compression codec not recognised: %v", str)
 }
@@ -214,6 +232,8 @@ func strToPartitioner(str string) (sarama.PartitionerConstructor, error) {
 		return sarama.NewRandomPartitioner, nil
 	case "round_robin":
 		return sarama.NewRoundRobinPartitioner, nil
+	case "manual":
+		return sarama.NewManualPartitioner, nil
 	default:
 	}
 	return nil, fmt.Errorf("partitioner not recognised: %v", str)
@@ -276,6 +296,7 @@ func (k *Kafka) Connect() error {
 
 	config := sarama.NewConfig()
 	config.ClientID = k.conf.ClientID
+	config.RackID = k.conf.RackID
 
 	config.Version = k.version
 
@@ -329,7 +350,8 @@ func (k *Kafka) WriteWithContext(ctx context.Context, msg types.Message) error {
 
 	userDefinedHeaders := k.buildUserDefinedHeaders(k.staticHeaders)
 	msgs := []*sarama.ProducerMessage{}
-	msg.Iter(func(i int, p types.Part) error {
+
+	err := msg.Iter(func(i int, p types.Part) error {
 		key := k.key.Bytes(i, msg)
 		nextMsg := &sarama.ProducerMessage{
 			Topic:    k.topic.String(i, msg),
@@ -340,11 +362,36 @@ func (k *Kafka) WriteWithContext(ctx context.Context, msg types.Message) error {
 		if len(key) > 0 {
 			nextMsg.Key = sarama.ByteEncoder(key)
 		}
+
+		// Only parse and set the partition if we are configured for manual
+		// partitioner.  Although samara will (currently) ignore the partition
+		// field when not using a manual partitioner, we should only set it when
+		// we explicitly want that.
+		if k.conf.Partitioner == "manual" {
+			partitionString := k.partition.String(i, msg)
+			if partitionString == "" {
+				return fmt.Errorf("partition expression failed to produce a value")
+			}
+
+			partitionInt, err := strconv.Atoi(partitionString)
+			if err != nil {
+				return fmt.Errorf("failed to parse valid integer from partition expression: %w", err)
+			}
+			if partitionInt < 0 {
+				return fmt.Errorf("invalid partition parsed from expression, must be >= 0, got %v", partitionInt)
+			}
+			// samara requires a 32-bit integer for the partition field
+			nextMsg.Partition = int32(partitionInt)
+		}
 		msgs = append(msgs, nextMsg)
 		return nil
 	})
 
-	err := producer.SendMessages(msgs)
+	if err != nil {
+		return err
+	}
+
+	err = producer.SendMessages(msgs)
 	for err != nil {
 		if pErrs, ok := err.(sarama.ProducerErrors); !k.conf.RetryAsBatch && ok {
 			if len(pErrs) == 0 {

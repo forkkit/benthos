@@ -1,10 +1,12 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime/debug"
 
+	"github.com/Jeffail/benthos/v3/internal/bloblang/parser"
 	clitemplate "github.com/Jeffail/benthos/v3/internal/cli/template"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/filepath"
@@ -28,8 +30,6 @@ var (
 	Version   string
 	DateBuilt string
 )
-
-//------------------------------------------------------------------------------
 
 // OptSetVersionStamp creates an opt func for setting the version and date built
 // stamps that Benthos returns via --version and the /version endpoint. The
@@ -58,6 +58,18 @@ func OptAddStringFlag(name, usage string, aliases []string, value string, destin
 			Usage:       usage,
 			Destination: destination,
 		})
+	}
+}
+
+//------------------------------------------------------------------------------
+
+var optContext = context.Background()
+
+// OptUseContext sets a context to be used for cancellation during the run
+// command. This adds one extra mechanism for graceful termination.
+func OptUseContext(ctx context.Context) func() {
+	return func() {
+		optContext = ctx
 	}
 }
 
@@ -102,9 +114,20 @@ func Run() {
 			Usage:   "display version info, then exit",
 		},
 		&cli.StringFlag{
+			Name:    "env-file",
+			Aliases: []string{"e"},
+			Value:   "",
+			Usage:   "import environment variables from a dotenv file",
+		},
+		&cli.StringFlag{
 			Name:  "log.level",
 			Value: "",
 			Usage: "override the configured log level, options are: off, error, warn, info, debug, trace",
+		},
+		&cli.StringSliceFlag{
+			Name:    "set",
+			Aliases: []string{"s"},
+			Usage:   "set a field (identified by a dot path) in the main configuration file, e.g. `\"metrics.type=prometheus\"`",
 		},
 		&cli.StringFlag{
 			Name:    "config",
@@ -127,6 +150,12 @@ func Run() {
 			Value: false,
 			Usage: "continue to execute a config containing linter errors",
 		},
+		&cli.BoolFlag{
+			Name:    "watcher",
+			Aliases: []string{"w"},
+			Value:   false,
+			Usage:   "EXPERIMENTAL: watch config files for changes and automatically apply them",
+		},
 	}
 	if len(customFlags) > 0 {
 		flags = append(flags, customFlags...)
@@ -144,6 +173,20 @@ func Run() {
    benthos -r "./production/*.yaml" -c ./config.yaml`[4:],
 		Flags: flags,
 		Before: func(c *cli.Context) error {
+			if dotEnvFile := c.String("env-file"); dotEnvFile != "" {
+				vars, err := parser.ParseDotEnvFile(dotEnvFile)
+				if err != nil {
+					fmt.Printf("Failed to read dotenv file: %v\n", err)
+					os.Exit(1)
+				}
+				for k, v := range vars {
+					if err = os.Setenv(k, v); err != nil {
+						fmt.Printf("Failed to set env var '%v': %v\n", k, err)
+						os.Exit(1)
+					}
+				}
+			}
+
 			templatesPaths, err := filepath.Globs(c.StringSlice("templates"))
 			if err != nil {
 				fmt.Printf("Failed to resolve template glob pattern: %v\n", err)
@@ -175,8 +218,11 @@ func Run() {
 			os.Exit(cmdService(
 				c.String("config"),
 				c.StringSlice("resources"),
+				c.StringSlice("set"),
 				c.String("log.level"),
 				!c.Bool("chilled"),
+				c.Bool("watcher"),
+				false,
 				false,
 				nil,
 			))
@@ -193,12 +239,15 @@ func Run() {
 
    benthos -c ./config.yaml echo | less`[4:],
 				Action: func(c *cli.Context) error {
-					readConfig(c.String("config"), c.StringSlice("resources"))
-
+					confReader := readConfig(c.String("config"), false, c.StringSlice("resources"), nil, c.StringSlice("set"))
+					if _, err := confReader.Read(&conf); err != nil {
+						fmt.Fprintf(os.Stderr, "Configuration file read error: %v\n", err)
+						os.Exit(1)
+					}
 					var node yaml.Node
 					err := node.Encode(conf)
 					if err == nil {
-						err = config.Spec().SanitiseNode(&node, docs.SanitiseConfig{
+						err = config.Spec().SanitiseYAML(&node, docs.SanitiseConfig{
 							RemoveTypeField: true,
 						})
 					}
@@ -224,9 +273,10 @@ func Run() {
    single process and can be created, updated and removed via REST HTTP
    endpoints.
 
-   benthos streams ./path/to/stream/configs ./and/some/more
-   benthos -c ./root_config.yaml streams ./path/to/stream/configs
+   benthos streams
    benthos -c ./root_config.yaml streams
+   benthos streams ./path/to/stream/configs ./and/some/more
+   benthos -c ./root_config.yaml streams ./streams/*.yaml
 
    In streams mode the stream fields of a root target config (input, buffer,
    pipeline, output) will be ignored. Other fields will be shared across all
@@ -234,12 +284,22 @@ func Run() {
 
    For more information check out the docs at:
    https://benthos.dev/docs/guides/streams_mode/about`[4:],
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "no-api",
+						Value: false,
+						Usage: "Disable the HTTP API for streams mode",
+					},
+				},
 				Action: func(c *cli.Context) error {
 					os.Exit(cmdService(
 						c.String("config"),
 						c.StringSlice("resources"),
+						c.StringSlice("set"),
 						c.String("log.level"),
 						!c.Bool("chilled"),
+						c.Bool("watcher"),
+						!c.Bool("no-api"),
 						true,
 						c.Args().Slice(),
 					))
@@ -254,7 +314,7 @@ func Run() {
    components will be shown.
 
    benthos list
-   benthos list inputs output
+   benthos list --format json inputs output
    benthos list rate-limits buffers`[4:],
 				Flags: []cli.Flag{
 					&cli.StringFlag{
@@ -301,7 +361,7 @@ func Run() {
 		}
 
 		deprecatedExecute(*configPath, testSuffix)
-		os.Exit(cmdService(*configPath, nil, "", false, false, nil))
+		os.Exit(cmdService(*configPath, nil, nil, "", false, false, false, false, nil))
 		return nil
 	}
 

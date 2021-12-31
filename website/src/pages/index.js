@@ -12,7 +12,9 @@ import TabItem from '@theme/TabItem';
 const installs = [
   {
     label: 'Curl',
-    snippet: `# Install
+    lang: 'bash',
+    copyBit: `curl -Lsf https://sh.benthos.dev | bash`,
+    config: `# Install
 curl -Lsf https://sh.benthos.dev | bash
 
 # Make a config
@@ -23,7 +25,9 @@ benthos -c ./config.yaml`
   },
   {
     label: 'Homebrew',
-    snippet: `# Install
+    lang: 'bash',
+    copyBit: `brew install benthos`,
+    config: `# Install
 brew install benthos
 
 # Make a config
@@ -34,7 +38,9 @@ benthos -c ./config.yaml`
   },
   {
     label: 'Docker',
-    snippet: `# Pull
+    lang: 'bash',
+    copyBit: `docker pull jeffail/benthos`,
+    config: `# Pull
 docker pull jeffail/benthos
 
 # Make a config
@@ -92,6 +98,40 @@ output:
             max_in_flight: 20`,
   },
   {
+    label: 'Windowing',
+    further: '/docs/configuration/windowed_processing',
+    config: `input:
+  nats_jetstream:
+    urls: [ nats://TODO:4222 ]
+    queue: myqueue
+    subject: traffic.light.events
+    deliver: all
+
+buffer:
+  system_window:
+    timestamp_mapping: root = this.created_at
+    size: 1h
+
+pipeline:
+  processors:
+    - group_by_value:
+        value: '\${! json("traffic_light_id") }'
+    - bloblang: |
+        root = if batch_index() == 0 {
+          {
+            "traffic_light_id": this.traffic_light_id,
+            "created_at": meta("window_end_timestamp"),
+            "total_cars": json("registration_plate").from_all().unique().length(),
+            "passengers": json("passengers").from_all().sum(),
+          }
+        } else { deleted() }
+
+output:
+  pulsar:
+    url: pulsar://TODO:6650
+    topic: traffic_windows`,
+  },
+  {
     label: 'Enrichments',
     further: '/cookbooks/enrichments',
     config: `input:
@@ -125,12 +165,6 @@ output:
   },
 ];
 
-function Snippet({label, config}) {
-  return (
-    <CodeSnippet className={styles.configSnippet} snippet={config}></CodeSnippet>
-  );
-}
-
 const features = [
   {
     title: 'Takes Care of the Dull Stuff',
@@ -161,15 +195,15 @@ const features = [
     ),
   },
   {
-    title: 'Reliable and Scalable',
+    title: 'Reliable and Operationally Simple',
     imageUrl: 'img/Blobscales.svg',
     description: (
       <>
         <p>
-          Benthos runs fast and processes messages using a transaction model, making it able to guarantee at-least-once delivery even in the event of crashes or unexpected server faults.
+          Benthos runs fast and processes messages using a transaction model, making it able to guarantee at-least-once delivery even in the event of crashes, disk corruption, or other unexpected server faults.
         </p>
         <p>
-          It's completely stateless, allowing for easy deployment and liberal scaling. It also exposes <a href="/docs/components/metrics/about">metrics</a> and <a href="/docs/components/tracers/about">tracing</a> events to targets of your choice.
+          It's completely stateless with no need for disk persisted state, allowing for easy deployment and liberal scaling. It also exposes <a href="/docs/components/metrics/about">metrics</a> and <a href="/docs/components/tracers/about">tracing</a> events to targets of your choice.
         </p>
         <p>
           At Meltwater it's enriching over 450 million documents per day with a network of more than 20 NLP services. It sounds very interesting but rest assured, <a href="https://underthehood.meltwater.com/blog/2019/08/26/enriching-450m-docs-daily-with-a-boring-stream-processor">it's totally drab</a>.
@@ -186,7 +220,7 @@ const features = [
           Sometimes the components that come with Benthos aren't enough. Luckily, Benthos has been designed to be easily plugged with whatever components you need.
         </p>
         <p>
-          You can either write plugins <a href="https://github.com/benthosdev/benthos-plugin-example">directly in Go (recommended)</a> or you can have Benthos run your plugin as a <a href="/docs/components/processors/subprocess">subprocess</a>.
+          You can either write plugins <a href="https://pkg.go.dev/github.com/Jeffail/benthos/v3/public">directly in Go (recommended)</a> or you can have Benthos run your plugin as a <a href="/docs/components/processors/subprocess">subprocess</a>.
         </p>
       </>
     ),
@@ -203,7 +237,7 @@ function Feature({imageUrl, title, description}) {
         </div>
       )}
       <h3>{title}</h3>
-      <p>{description}</p>
+      {description}
     </div>
   );
 }
@@ -214,7 +248,7 @@ function Home() {
   return (
     <Layout
       title={`${siteConfig.title}`}
-      description="The stream processor for mundane tasks"
+      description="Fancy stream processing made operationally mundane"
       keywords={["benthos","stream processor","data engineering","ETL","ELT","event processor","go","golang"]}>
       <header className={classnames('hero', styles.heroBanner)}>
         <div className="container">
@@ -252,8 +286,8 @@ function Home() {
                   return {label:props.label, value:props.label};
                 })}>
                   {installs.map((props, idx) => (
-                    <TabItem value={props.label}>
-                      <CodeSnippet snippet={props.snippet} lang="bash"></CodeSnippet>
+                    <TabItem key={idx} value={props.label}>
+                      <CodeSnippet {...props}></CodeSnippet>
                     </TabItem>
                   ))}
                 </Tabs>
@@ -266,15 +300,8 @@ function Home() {
                       return {label:props.label, value:props.label};
                     })}>
                       {snippets.map((props, idx) => (
-                        <TabItem value={props.label}>
-                          <>
-                          <Snippet key={idx} {...props} />
-                          <Link
-                            className={classnames('button button--outline button--secondary')}
-                            to={props.further}>
-                            Read more
-                          </Link>
-                          </>
+                        <TabItem key={idx} value={props.label}>
+                          <CodeSnippet className={styles.configSnippet} {...props}></CodeSnippet>
                         </TabItem>
                       ))}
                     </Tabs>
@@ -300,8 +327,11 @@ function Home() {
               <div className={classnames('col col--6')}>
                 <h3>Sponsored by the following heroes</h3>
                 <a href="https://www.meltwater.com/" className={styles.sponsorLink}><img className={styles.meltwaterImg} src="/img/sponsors/mw_logo.png" /></a>
-                <a href="https://www.whiteops.com/" className={styles.sponsorLink}><img className={styles.whiteopsImg} src="/img/sponsors/whiteops_logo.png" /></a>
+                <a href="https://www.humansecurity.com" className={styles.sponsorLink}><img className={styles.humanImg} src="/img/sponsors/HUMAN_logo.png" /></a>
                 <a href="https://www.infosum.com/" className={styles.sponsorLink}><img className={styles.infosumImg} src="/img/sponsors/infosum_logo.png" /></a>
+                <a href="https://community.com/" className={styles.sponsorLink}><img className={styles.communityImg} src="/img/sponsors/community.svg" /></a>
+                <a href="https://www.optum.com/" className={styles.sponsorLink}><img className={styles.optumImg} src="/img/sponsors/optum_logo.png" /></a>
+                <a href="https://aurora.dev/" className={styles.sponsorLink}><img className={styles.auroraImg} src="/img/sponsors/aurora.svg" /></a>
               </div>
               <div className={classnames('col col--6', styles.loveSectionPlea)}>
                 <div>

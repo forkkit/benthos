@@ -5,11 +5,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 )
@@ -39,7 +39,7 @@ pipeline:
           duration: ${! meta("sleep_for") }
 ` + "```" + ``,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("duration", "The duration of time to sleep for each execution."),
+			docs.FieldInterpolatedString("duration", "The duration of time to sleep for each execution."),
 		},
 	}
 }
@@ -82,7 +82,7 @@ type Sleep struct {
 func NewSleep(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	durationStr, err := bloblang.NewField(conf.Sleep.Duration)
+	durationStr, err := interop.NewBloblangField(mgr, conf.Sleep.Duration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse duration expression: %v", err)
 	}

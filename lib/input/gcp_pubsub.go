@@ -38,11 +38,12 @@ You can access these metadata fields using
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("project", "The project ID of the target subscription."),
 			docs.FieldCommon("subscription", "The target subscription ID."),
+			docs.FieldCommon("sync", "Enable synchronous pull mode."),
 			docs.FieldCommon("max_outstanding_messages", "The maximum number of outstanding pending messages to be consumed at a given time."),
 			docs.FieldCommon("max_outstanding_bytes", "The maximum number of outstanding pending messages to be consumed measured in bytes."),
 			func() docs.FieldSpec {
 				b := batch.FieldSpec()
-				b.Deprecated = true
+				b.IsDeprecated = true
 				return b
 			}(),
 			docs.FieldDeprecated("max_batch_count"),

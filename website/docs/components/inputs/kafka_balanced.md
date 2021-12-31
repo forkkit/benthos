@@ -62,6 +62,7 @@ input:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     sasl:
@@ -74,6 +75,7 @@ input:
     topics:
       - benthos_stream
     client_id: benthos_kafka_input
+    rack_id: ""
     consumer_group: benthos_consumer_group
     start_from_oldest: true
     commit_period: 1s
@@ -188,6 +190,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -208,6 +227,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -270,7 +290,7 @@ Default: `""`
 
 | Option | Summary |
 |---|---|
-| `PLAIN` | Plain text authentication. |
+| `PLAIN` | Plain text authentication. NOTE: When using plain text auth it is extremely likely that you'll also need to [enable TLS](#tlsenabled). |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `SCRAM-SHA-256` | Authentication using the SCRAM-SHA-256 mechanism. |
 | `SCRAM-SHA-512` | Authentication using the SCRAM-SHA-512 mechanism. |
@@ -343,6 +363,14 @@ An identifier for the client connection.
 
 Type: `string`  
 Default: `"benthos_kafka_input"`  
+
+### `rack_id`
+
+A rack identifier for this client.
+
+
+Type: `string`  
+Default: `""`  
 
 ### `consumer_group`
 

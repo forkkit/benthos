@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/golang/snappy"
-	"github.com/opentracing/opentracing-go"
+	"github.com/pierrec/lz4/v4"
 )
 
 //------------------------------------------------------------------------------
@@ -29,9 +30,9 @@ func init() {
 		},
 		Summary: `
 Decompresses messages according to the selected algorithm. Supported
-decompression types are: gzip, zlib, bzip2, flate.`,
+decompression types are: gzip, zlib, bzip2, flate, snappy, lz4.`,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("algorithm", "The decompression algorithm to use.").HasOptions("gzip", "zlib", "bzip2", "flate", "snappy"),
+			docs.FieldCommon("algorithm", "The decompression algorithm to use.").HasOptions("gzip", "zlib", "bzip2", "flate", "snappy", "lz4"),
 			PartsFieldSpec,
 		},
 	}
@@ -58,17 +59,17 @@ func NewDecompressConfig() DecompressConfig {
 type decompressFunc func(bytes []byte) ([]byte, error)
 
 func gzipDecompress(b []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(b)
-	zr, err := gzip.NewReader(buf)
+	r, err := gzip.NewReader(bytes.NewBuffer(b))
 	if err != nil {
 		return nil, err
 	}
 
 	outBuf := bytes.Buffer{}
-	if _, err = outBuf.ReadFrom(zr); err != nil && err != io.EOF {
+	if _, err = io.Copy(&outBuf, r); err != nil {
+		r.Close()
 		return nil, err
 	}
-	zr.Close()
+	r.Close()
 	return outBuf.Bytes(), nil
 }
 
@@ -77,40 +78,51 @@ func snappyDecompress(b []byte) ([]byte, error) {
 }
 
 func zlibDecompress(b []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(b)
-	zr, err := zlib.NewReader(buf)
+	r, err := zlib.NewReader(bytes.NewBuffer(b))
 	if err != nil {
 		return nil, err
 	}
 
 	outBuf := bytes.Buffer{}
-	if _, err = outBuf.ReadFrom(zr); err != nil && err != io.EOF {
+	if _, err = io.Copy(&outBuf, r); err != nil {
+		r.Close()
 		return nil, err
 	}
-	zr.Close()
+	r.Close()
 	return outBuf.Bytes(), nil
 }
 
 func flateDecompress(b []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(b)
-	zr := flate.NewReader(buf)
+	r := flate.NewReader(bytes.NewBuffer(b))
 
 	outBuf := bytes.Buffer{}
-	if _, err := outBuf.ReadFrom(zr); err != nil && err != io.EOF {
+	if _, err := io.Copy(&outBuf, r); err != nil {
+		r.Close()
 		return nil, err
 	}
-	zr.Close()
+	r.Close()
 	return outBuf.Bytes(), nil
 }
 
 func bzip2Decompress(b []byte) ([]byte, error) {
-	buf := bytes.NewBuffer(b)
-	zr := bzip2.NewReader(buf)
+	r := bzip2.NewReader(bytes.NewBuffer(b))
 
 	outBuf := bytes.Buffer{}
-	if _, err := outBuf.ReadFrom(zr); err != nil && err != io.EOF {
+	if _, err := io.Copy(&outBuf, r); err != nil {
 		return nil, err
 	}
+	return outBuf.Bytes(), nil
+}
+
+func lz4Decompress(b []byte) ([]byte, error) {
+	buf := bytes.NewBuffer(b)
+	r := lz4.NewReader(buf)
+
+	outBuf := bytes.Buffer{}
+	if _, err := outBuf.ReadFrom(r); err != nil && err != io.EOF {
+		return nil, err
+	}
+
 	return outBuf.Bytes(), nil
 }
 
@@ -126,6 +138,8 @@ func strToDecompressor(str string) (decompressFunc, error) {
 		return bzip2Decompress, nil
 	case "snappy":
 		return snappyDecompress, nil
+	case "lz4":
+		return lz4Decompress, nil
 	}
 	return nil, fmt.Errorf("decompression type not recognised: %v", str)
 }
@@ -176,7 +190,7 @@ func (d *Decompress) ProcessMessage(msg types.Message) ([]types.Message, types.R
 	d.mCount.Incr(1)
 	newMsg := msg.Copy()
 
-	proc := func(i int, span opentracing.Span, part types.Part) error {
+	proc := func(i int, span *tracing.Span, part types.Part) error {
 		newBytes, err := d.decomp(part.Get())
 		if err != nil {
 			d.mErr.Incr(1)
@@ -191,7 +205,7 @@ func (d *Decompress) ProcessMessage(msg types.Message) ([]types.Message, types.R
 		return nil, response.NewAck()
 	}
 
-	IteratePartsWithSpan(TypeDecompress, d.conf.Parts, newMsg, proc)
+	IteratePartsWithSpanV2(TypeDecompress, d.conf.Parts, newMsg, proc)
 
 	d.mBatchSent.Incr(1)
 	d.mSent.Incr(int64(newMsg.Len()))

@@ -36,9 +36,11 @@ false for connections to succeed.`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("urls", "A list of URLs to connect to. If an item of the list contains commas it will be expanded into multiple URLs.", []string{"http://localhost:9200"}).Array(),
 			docs.FieldCommon("index", "The index to place messages.").IsInterpolated(),
+			docs.FieldAdvanced("action", "The action to take on the document.").IsInterpolated().HasOptions("index", "update", "delete"),
 			docs.FieldAdvanced("pipeline", "An optional pipeline id to preprocess incoming documents.").IsInterpolated(),
 			docs.FieldCommon("id", "The ID for indexed messages. Interpolation should be used in order to create a unique ID for each message.").IsInterpolated(),
 			docs.FieldCommon("type", "The document type."),
+			docs.FieldAdvanced("routing", "The routing key to use for the document.").IsInterpolated(),
 			docs.FieldAdvanced("sniff", "Prompts Benthos to sniff for brokers to connect to when establishing a connection."),
 			docs.FieldAdvanced("healthcheck", "Whether to enable healthchecks."),
 			docs.FieldAdvanced("timeout", "The maximum time to wait before abandoning a request (and trying again)."),
@@ -52,6 +54,7 @@ false for connections to succeed.`,
 					docs.FieldCommon("enabled", "Whether to connect to Amazon Elastic Service."),
 				}.Merge(sess.FieldSpecs())...,
 			),
+			docs.FieldAdvanced("gzip_compression", "Enable gzip compression on the request side."),
 		),
 		Categories: []Category{
 			CategoryServices,
@@ -63,7 +66,7 @@ false for connections to succeed.`,
 
 // NewElasticsearch creates a new Elasticsearch output type.
 func NewElasticsearch(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-	elasticWriter, err := writer.NewElasticsearch(conf.Elasticsearch, log, stats)
+	elasticWriter, err := writer.NewElasticsearchV2(conf.Elasticsearch, mgr, log, stats)
 	if err != nil {
 		return nil, err
 	}

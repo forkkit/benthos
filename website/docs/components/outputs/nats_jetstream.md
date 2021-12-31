@@ -15,8 +15,9 @@ categories: ["Services"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Write messages to a NATS JetStream subject.
 
 Introduced in version 3.46.0.
@@ -56,12 +57,43 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
+    auth:
+      nkey_file: ""
+      user_credentials_file: ""
 ```
 
 </TabItem>
 </Tabs>
+
+### Authentication
+
+There are several components within Benthos which utilise NATS services. You will find that each of these components
+support optional advanced authentication parameters for [NKeys](https://docs.nats.io/nats-server/configuration/securing_nats/auth_intro/nkey_auth)
+and [User Credentials](https://docs.nats.io/developing-with-nats/security/creds).
+
+An in depth tutorial can be found [here](https://docs.nats.io/developing-with-nats/tutorials/jwt).
+
+#### NKey file
+
+The NATS server can use these NKeys in several ways for authentication. The simplest is for the server to be configured
+with a list of known public keys and for the clients to respond to the challenge by signing it with its private NKey
+configured in the `nkey_file` field.
+
+More details [here](https://docs.nats.io/developing-with-nats/security/nkey).
+
+#### User Credentials file
+
+NATS server supports decentralized authentication based on JSON Web Tokens (JWT). Clients need an [user JWT](https://docs.nats.io/nats-server/configuration/securing_nats/jwt#json-web-tokens)
+and a corresponding [NKey secret](https://docs.nats.io/developing-with-nats/security/nkey) when connecting to a server
+which is configured to use this authentication scheme.
+
+The `user_credentials_file` field should point to a file containing both the private key and the JWT and can be
+generated with the [nsc tool](https://docs.nats.io/nats-tools/nsc).
+
+More details [here](https://docs.nats.io/developing-with-nats/security/creds).
 
 ## Fields
 
@@ -71,7 +103,6 @@ A list of URLs to connect to. If an item of the list contains commas it will be 
 
 
 Type: `array`  
-Default: `["nats://127.0.0.1:4222"]`  
 
 ```yaml
 # Examples
@@ -90,7 +121,16 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 
 Type: `string`  
-Default: `""`  
+
+```yaml
+# Examples
+
+subject: foo.bar.baz
+
+subject: ${! meta("kafka_topic") }
+
+subject: foo.${! json("meta.type") }
+```
 
 ### `max_in_flight`
 
@@ -131,6 +171,23 @@ Whether to allow the remote server to repeatedly request renegotiation. Enable t
 Type: `bool`  
 Default: `false`  
 Requires version 3.45.0 or newer  
+
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
 
 ### `tls.root_cas_file`
 
@@ -196,5 +253,38 @@ The path of a certificate key to use.
 
 Type: `string`  
 Default: `""`  
+
+### `auth`
+
+Optional configuration of NATS authentication parameters.
+
+
+Type: `object`  
+
+### `auth.nkey_file`
+
+An optional file containing a NKey seed.
+
+
+Type: `string`  
+
+```yaml
+# Examples
+
+nkey_file: ./seed.nk
+```
+
+### `auth.user_credentials_file`
+
+An optional file containing user credentials which consist of an user JWT and corresponding NKey seed.
+
+
+Type: `string`  
+
+```yaml
+# Examples
+
+user_credentials_file: ./user.creds
+```
 
 

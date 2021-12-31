@@ -2,7 +2,7 @@ package output
 
 import (
 	"github.com/Jeffail/benthos/v3/internal/docs"
-	"github.com/Jeffail/benthos/v3/internal/service/redis"
+	"github.com/Jeffail/benthos/v3/internal/impl/redis"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/output/writer"
@@ -57,7 +57,7 @@ Where latter stages will overwrite matching field names of a former stage.`,
 			).IsInterpolated(),
 			docs.FieldCommon("walk_metadata", "Whether all metadata fields of messages should be walked and added to the list of hash fields to set."),
 			docs.FieldCommon("walk_json_object", "Whether to walk each message as a JSON object and add each key/value pair to the list of hash fields to set."),
-			docs.FieldCommon("fields", "A map of key/value pairs to set as hash fields.").IsInterpolated().Map(),
+			docs.FieldString("fields", "A map of key/value pairs to set as hash fields.").IsInterpolated().Map(),
 			docs.FieldCommon("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
 		),
 		Categories: []Category{
@@ -70,7 +70,7 @@ Where latter stages will overwrite matching field names of a former stage.`,
 
 // NewRedisHash creates a new RedisHash output type.
 func NewRedisHash(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-	rhash, err := writer.NewRedisHash(conf.RedisHash, log, stats)
+	rhash, err := writer.NewRedisHashV2(conf.RedisHash, mgr, log, stats)
 	if err != nil {
 		return nil, err
 	}

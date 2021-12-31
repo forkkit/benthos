@@ -8,9 +8,9 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/Jeffail/gabs/v2"
@@ -33,7 +33,7 @@ payloads to the processed result.`,
 			docs.FieldCommon(
 				"result_type", "The final data type to marshal the processing result into. The `discard` type is a special case that discards the result of the processing steps entirely.",
 			).HasOptions("string", "int", "float", "bool", "object", "discard"),
-			docs.FieldCommon("processors", "A list of child processors to execute on the extracted value.").Array().HasType(docs.FieldProcessor),
+			docs.FieldCommon("processors", "A list of child processors to execute on the extracted value.").Array().HasType(docs.FieldTypeProcessor),
 			PartsFieldSpec,
 		},
 		Description: `

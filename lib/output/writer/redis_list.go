@@ -6,10 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
+	ibatch "github.com/Jeffail/benthos/v3/internal/batch"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
-	bredis "github.com/Jeffail/benthos/v3/internal/service/redis"
+	bredis "github.com/Jeffail/benthos/v3/internal/impl/redis"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
+	"github.com/Jeffail/benthos/v3/lib/message/batch"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/go-redis/redis/v7"
@@ -20,8 +22,9 @@ import (
 // RedisListConfig contains configuration fields for the RedisList output type.
 type RedisListConfig struct {
 	bredis.Config `json:",inline" yaml:",inline"`
-	Key           string `json:"key" yaml:"key"`
-	MaxInFlight   int    `json:"max_in_flight" yaml:"max_in_flight"`
+	Key           string             `json:"key" yaml:"key"`
+	MaxInFlight   int                `json:"max_in_flight" yaml:"max_in_flight"`
+	Batching      batch.PolicyConfig `json:"batching" yaml:"batching"`
 }
 
 // NewRedisListConfig creates a new RedisListConfig with default values.
@@ -30,6 +33,7 @@ func NewRedisListConfig() RedisListConfig {
 		Config:      bredis.NewConfig(),
 		Key:         "benthos_list",
 		MaxInFlight: 1,
+		Batching:    batch.NewPolicyConfig(),
 	}
 }
 
@@ -49,8 +53,20 @@ type RedisList struct {
 }
 
 // NewRedisList creates a new RedisList output type.
+//
+// Deprecated: use the V2 API instead.
 func NewRedisList(
 	conf RedisListConfig,
+	log log.Modular,
+	stats metrics.Type,
+) (*RedisList, error) {
+	return NewRedisListV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewRedisListV2 creates a new RedisList output type.
+func NewRedisListV2(
+	conf RedisListConfig,
+	mgr types.Manager,
 	log log.Modular,
 	stats metrics.Type,
 ) (*RedisList, error) {
@@ -61,7 +77,7 @@ func NewRedisList(
 	}
 
 	var err error
-	if r.keyStr, err = bloblang.NewField(conf.Key); err != nil {
+	if r.keyStr, err = interop.NewBloblangField(mgr, conf.Key); err != nil {
 		return nil, fmt.Errorf("failed to parse key expression: %v", err)
 	}
 	if _, err := conf.Config.Client(); err != nil {
@@ -100,11 +116,6 @@ func (r *RedisList) Connect() error {
 // WriteWithContext attempts to write a message by pushing it to the end of a
 // Redis list.
 func (r *RedisList) WriteWithContext(ctx context.Context, msg types.Message) error {
-	return r.Write(msg)
-}
-
-// Write attempts to write a message by pushing it to the end of a Redis list.
-func (r *RedisList) Write(msg types.Message) error {
 	r.connMut.RLock()
 	client := r.client
 	r.connMut.RUnlock()
@@ -113,15 +124,47 @@ func (r *RedisList) Write(msg types.Message) error {
 		return types.ErrNotConnected
 	}
 
-	return IterateBatchedSend(msg, func(i int, p types.Part) error {
-		key := r.keyStr.String(i, msg)
-		if err := client.RPush(key, p.Get()).Err(); err != nil {
+	if msg.Len() == 1 {
+		key := r.keyStr.String(0, msg)
+		if err := client.RPush(key, msg.Get(0).Get()).Err(); err != nil {
 			r.disconnect()
 			r.log.Errorf("Error from redis: %v\n", err)
 			return types.ErrNotConnected
 		}
 		return nil
+	}
+
+	pipe := client.Pipeline()
+	msg.Iter(func(i int, p types.Part) error {
+		key := r.keyStr.String(0, msg)
+		_ = pipe.RPush(key, p.Get())
+		return nil
 	})
+	cmders, err := pipe.Exec()
+	if err != nil {
+		r.disconnect()
+		r.log.Errorf("Error from redis: %v\n", err)
+		return types.ErrNotConnected
+	}
+
+	var batchErr *ibatch.Error
+	for i, res := range cmders {
+		if res.Err() != nil {
+			if batchErr == nil {
+				batchErr = ibatch.NewError(msg, res.Err())
+			}
+			batchErr.Failed(i, res.Err())
+		}
+	}
+	if batchErr != nil {
+		return batchErr
+	}
+	return nil
+}
+
+// Write attempts to write a message by pushing it to the end of a Redis list.
+func (r *RedisList) Write(msg types.Message) error {
+	return r.WriteWithContext(context.Background(), msg)
 }
 
 // disconnect safely closes a connection to an RedisList server.

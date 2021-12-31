@@ -6,9 +6,9 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/condition"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 )
@@ -36,9 +36,9 @@ the ` + "`else_processors`" + ` are applied.
 In order to conditionally process each message of a batch individually use this
 processor with the ` + "[`for_each`](/docs/components/processors/for_each)" + ` processor.`,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("condition", "The [`condition`](/docs/components/conditions/about) to check against messages.").HasType(docs.FieldCondition),
-			docs.FieldCommon("processors", "A list of processors to apply when the condition passes.").Array().HasType(docs.FieldProcessor),
-			docs.FieldCommon("else_processors", "A list of processors to apply when the condition does not pass.").Array().HasType(docs.FieldProcessor),
+			docs.FieldCommon("condition", "The [`condition`](/docs/components/conditions/about) to check against messages.").HasType(docs.FieldTypeCondition),
+			docs.FieldCommon("processors", "A list of processors to apply when the condition passes.").Array().HasType(docs.FieldTypeProcessor),
+			docs.FieldCommon("else_processors", "A list of processors to apply when the condition does not pass.").Array().HasType(docs.FieldTypeProcessor),
 		},
 	}
 }

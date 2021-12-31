@@ -35,6 +35,7 @@ type ConstructorFunc func(Config, types.Manager, log.Modular, metrics.Type) (typ
 
 // WalkConstructors iterates each component constructor.
 func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
+	inferred := docs.ComponentFieldsFromConf(NewConfig())
 	for k, v := range Constructors {
 		spec := docs.ComponentSpec{
 			Type:        docs.TypeRateLimit,
@@ -42,7 +43,7 @@ func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
 			Summary:     v.Summary,
 			Description: v.Description,
 			Footnotes:   v.Footnotes,
-			Config:      docs.FieldComponent().WithChildren(v.FieldSpecs...),
+			Config:      docs.FieldComponent().WithChildren(v.FieldSpecs.DefaultAndTypeFrom(inferred[k])...),
 			Status:      v.Status,
 			Version:     v.Version,
 		}
@@ -66,6 +67,8 @@ var Constructors = map[string]TypeSpec{}
 //------------------------------------------------------------------------------
 
 // String constants representing each ratelimit type.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 const (
 	TypeLocal = "local"
 )
@@ -73,6 +76,8 @@ const (
 //------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all cache types.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 type Config struct {
 	Label  string      `json:"label" yaml:"label"`
 	Type   string      `json:"type" yaml:"type"`
@@ -81,6 +86,8 @@ type Config struct {
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 func NewConfig() Config {
 	return Config{
 		Label:  "",
@@ -134,12 +141,12 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var spec docs.ComponentSpec
-	if aliased.Type, spec, err = docs.GetInferenceCandidateFromNode(docs.TypeRateLimit, aliased.Type, value); err != nil {
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(nil, docs.TypeRateLimit, aliased.Type, value); err != nil {
 		return fmt.Errorf("line %v: %w", value.Line, err)
 	}
 
 	if spec.Plugin {
-		pluginNode, err := docs.GetPluginConfigNode(aliased.Type, value)
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
 		if err != nil {
 			return fmt.Errorf("line %v: %v", value.Line, err)
 		}

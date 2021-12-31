@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message/batch"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -37,20 +37,23 @@ type OptionalAWSConfig struct {
 // ElasticsearchConfig contains configuration fields for the Elasticsearch
 // output type.
 type ElasticsearchConfig struct {
-	URLs           []string             `json:"urls" yaml:"urls"`
-	Sniff          bool                 `json:"sniff" yaml:"sniff"`
-	Healthcheck    bool                 `json:"healthcheck" yaml:"healthcheck"`
-	ID             string               `json:"id" yaml:"id"`
-	Index          string               `json:"index" yaml:"index"`
-	Pipeline       string               `json:"pipeline" yaml:"pipeline"`
-	Type           string               `json:"type" yaml:"type"`
-	Timeout        string               `json:"timeout" yaml:"timeout"`
-	TLS            btls.Config          `json:"tls" yaml:"tls"`
-	Auth           auth.BasicAuthConfig `json:"basic_auth" yaml:"basic_auth"`
-	AWS            OptionalAWSConfig    `json:"aws" yaml:"aws"`
-	MaxInFlight    int                  `json:"max_in_flight" yaml:"max_in_flight"`
-	retries.Config `json:",inline" yaml:",inline"`
-	Batching       batch.PolicyConfig `json:"batching" yaml:"batching"`
+	URLs            []string             `json:"urls" yaml:"urls"`
+	Sniff           bool                 `json:"sniff" yaml:"sniff"`
+	Healthcheck     bool                 `json:"healthcheck" yaml:"healthcheck"`
+	ID              string               `json:"id" yaml:"id"`
+	Action          string               `json:"action" yaml:"action"`
+	Index           string               `json:"index" yaml:"index"`
+	Pipeline        string               `json:"pipeline" yaml:"pipeline"`
+	Routing         string               `json:"routing" yaml:"routing"`
+	Type            string               `json:"type" yaml:"type"`
+	Timeout         string               `json:"timeout" yaml:"timeout"`
+	TLS             btls.Config          `json:"tls" yaml:"tls"`
+	Auth            auth.BasicAuthConfig `json:"basic_auth" yaml:"basic_auth"`
+	AWS             OptionalAWSConfig    `json:"aws" yaml:"aws"`
+	GzipCompression bool                 `json:"gzip_compression" yaml:"gzip_compression"`
+	MaxInFlight     int                  `json:"max_in_flight" yaml:"max_in_flight"`
+	retries.Config  `json:",inline" yaml:",inline"`
+	Batching        batch.PolicyConfig `json:"batching" yaml:"batching"`
 }
 
 // NewElasticsearchConfig creates a new ElasticsearchConfig with default values.
@@ -64,10 +67,12 @@ func NewElasticsearchConfig() ElasticsearchConfig {
 		URLs:        []string{"http://localhost:9200"},
 		Sniff:       true,
 		Healthcheck: true,
+		Action:      "index",
 		ID:          `${!count("elastic_ids")}-${!timestamp_unix()}`,
 		Index:       "benthos_index",
 		Pipeline:    "",
 		Type:        "doc",
+		Routing:     "",
 		Timeout:     "5s",
 		TLS:         btls.NewConfig(),
 		Auth:        auth.NewBasicAuthConfig(),
@@ -75,9 +80,10 @@ func NewElasticsearchConfig() ElasticsearchConfig {
 			Enabled: false,
 			Config:  sess.NewConfig(),
 		},
-		MaxInFlight: 1,
-		Config:      rConf,
-		Batching:    batch.NewPolicyConfig(),
+		GzipCompression: false,
+		MaxInFlight:     1,
+		Config:          rConf,
+		Batching:        batch.NewPolicyConfig(),
 	}
 }
 
@@ -97,9 +103,11 @@ type Elasticsearch struct {
 	timeout     time.Duration
 	tlsConf     *tls.Config
 
+	actionStr   *field.Expression
 	idStr       *field.Expression
 	indexStr    *field.Expression
 	pipelineStr *field.Expression
+	routingStr  *field.Expression
 
 	eJSONErr metrics.StatCounter
 
@@ -107,7 +115,14 @@ type Elasticsearch struct {
 }
 
 // NewElasticsearch creates a new Elasticsearch writer type.
+//
+// Deprecated: use the V2 API instead.
 func NewElasticsearch(conf ElasticsearchConfig, log log.Modular, stats metrics.Type) (*Elasticsearch, error) {
+	return NewElasticsearchV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewElasticsearchV2 creates a new Elasticsearch writer type.
+func NewElasticsearchV2(conf ElasticsearchConfig, mgr types.Manager, log log.Modular, stats metrics.Type) (*Elasticsearch, error) {
 	e := Elasticsearch{
 		log:         log,
 		stats:       stats,
@@ -118,14 +133,20 @@ func NewElasticsearch(conf ElasticsearchConfig, log log.Modular, stats metrics.T
 	}
 
 	var err error
-	if e.idStr, err = bloblang.NewField(conf.ID); err != nil {
+	if e.actionStr, err = interop.NewBloblangField(mgr, conf.Action); err != nil {
+		return nil, fmt.Errorf("failed to parse action expression: %v", err)
+	}
+	if e.idStr, err = interop.NewBloblangField(mgr, conf.ID); err != nil {
 		return nil, fmt.Errorf("failed to parse id expression: %v", err)
 	}
-	if e.indexStr, err = bloblang.NewField(conf.Index); err != nil {
+	if e.indexStr, err = interop.NewBloblangField(mgr, conf.Index); err != nil {
 		return nil, fmt.Errorf("failed to parse index expression: %v", err)
 	}
-	if e.pipelineStr, err = bloblang.NewField(conf.Pipeline); err != nil {
+	if e.pipelineStr, err = interop.NewBloblangField(mgr, conf.Pipeline); err != nil {
 		return nil, fmt.Errorf("failed to parse pipeline expression: %v", err)
+	}
+	if e.routingStr, err = interop.NewBloblangField(mgr, conf.Routing); err != nil {
+		return nil, fmt.Errorf("failed to parse routing key expression: %v", err)
 	}
 
 	for _, u := range conf.URLs {
@@ -205,6 +226,10 @@ func (e *Elasticsearch) Connect() error {
 		opts = append(opts, elastic.SetHttpClient(signingClient))
 	}
 
+	if e.conf.GzipCompression {
+		opts = append(opts, elastic.SetGzip(true))
+	}
+
 	client, err := elastic.NewClient(opts...)
 	if err != nil {
 		return err
@@ -223,8 +248,10 @@ func shouldRetry(s int) bool {
 }
 
 type pendingBulkIndex struct {
+	Action   string
 	Index    string
 	Pipeline string
+	Routing  string
 	Type     string
 	Doc      interface{}
 }
@@ -244,50 +271,34 @@ func (e *Elasticsearch) Write(msg types.Message) error {
 
 	boff := e.backoffCtor()
 
-	if msg.Len() == 1 {
-		index := e.indexStr.String(0, msg)
-		// nolint:staticcheck // Ignore SA1019 Type is deprecated warning for .Index()
-		_, err := e.client.Index().
-			Index(index).
-			Pipeline(e.pipelineStr.String(0, msg)).
-			Type(e.conf.Type).
-			Id(e.idStr.String(0, msg)).
-			BodyString(string(msg.Get(0).Get())).
-			Do(context.Background())
-		if err == nil {
-			// Flush to make sure the document got written.
-			_, err = e.client.Flush().Index(index).Do(context.Background())
-		}
-		return err
-	}
-
 	requests := map[string]*pendingBulkIndex{}
-	msg.Iter(func(i int, part types.Part) error {
+	if err := msg.Iter(func(i int, part types.Part) error {
 		jObj, ierr := part.JSON()
 		if ierr != nil {
 			e.eJSONErr.Incr(1)
 			e.log.Errorf("Failed to marshal message into JSON document: %v\n", ierr)
-			return nil
+			return fmt.Errorf("failed to marshal message into JSON document: %w", ierr)
 		}
 		requests[e.idStr.String(i, msg)] = &pendingBulkIndex{
+			Action:   e.actionStr.String(i, msg),
 			Index:    e.indexStr.String(i, msg),
 			Pipeline: e.pipelineStr.String(i, msg),
+			Routing:  e.routingStr.String(i, msg),
 			Type:     e.conf.Type,
 			Doc:      jObj,
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
 
 	b := e.client.Bulk()
 	for k, v := range requests {
-		b.Add(
-			elastic.NewBulkIndexRequest().
-				Index(v.Index).
-				Pipeline(v.Pipeline).
-				Type(v.Type).
-				Id(k).
-				Doc(v.Doc),
-		)
+		bulkReq, err := e.buildBulkableRequest(k, v)
+		if err != nil {
+			return err
+		}
+		b.Add(bulkReq)
 	}
 
 	for b.NumberOfActions() != 0 {
@@ -303,24 +314,29 @@ func (e *Elasticsearch) Write(msg types.Message) error {
 
 		wait := boff.NextBackOff()
 		for i := 0; i < len(failed); i++ {
-			if !shouldRetry(failed[i].Status) {
-				e.log.Errorf("Elasticsearch message '%v' rejected with code [%s]: %v\n", failed[i].Id, failed[i].Status, failed[i].Error.Reason)
-				return fmt.Errorf("failed to send %v parts from message: %v", len(failed), failed[0].Error.Reason)
+			reason := "no reason given"
+			if fErr := failed[i].Error; fErr != nil {
+				reason = fErr.Reason
 			}
-			e.log.Errorf("Elasticsearch message '%v' failed with code [%s]: %v\n", failed[i].Id, failed[i].Status, failed[i].Error.Reason)
+			if !shouldRetry(failed[i].Status) {
+				e.log.Errorf("Elasticsearch message '%v' rejected with code [%v]: %v\n", failed[i].Id, failed[i].Status, reason)
+				return fmt.Errorf("failed to send %v parts from message: [%v]: %v", len(failed), failed[i].Status, reason)
+			}
+			e.log.Errorf("Elasticsearch message '%v' failed with code [%v]: %v\n", failed[i].Id, failed[i].Status, reason)
 			id := failed[i].Id
 			req := requests[id]
-			b.Add(
-				elastic.NewBulkIndexRequest().
-					Index(req.Index).
-					Pipeline(req.Pipeline).
-					Type(req.Type).
-					Id(id).
-					Doc(req.Doc),
-			)
+			bulkReq, err := e.buildBulkableRequest(id, req)
+			if err != nil {
+				return err
+			}
+			b.Add(bulkReq)
 		}
 		if wait == backoff.Stop {
-			return fmt.Errorf("failed to send %v parts from message: %v", len(failed), failed[0].Error.Reason)
+			reason := "no reason given"
+			if fErr := failed[0].Error; fErr != nil {
+				reason = fErr.Reason
+			}
+			return fmt.Errorf("failed to send %v parts from message: %v", len(failed), reason)
 		}
 		time.Sleep(wait)
 	}
@@ -335,6 +351,35 @@ func (e *Elasticsearch) CloseAsync() {
 // WaitForClose blocks until the Elasticsearch writer has closed down.
 func (e *Elasticsearch) WaitForClose(timeout time.Duration) error {
 	return nil
+}
+
+// Build a bulkable request for a given pending bulk index item.
+func (e *Elasticsearch) buildBulkableRequest(id string, p *pendingBulkIndex) (elastic.BulkableRequest, error) {
+	switch p.Action {
+	case "update":
+		return elastic.NewBulkUpdateRequest().
+			Index(p.Index).
+			Routing(p.Routing).
+			Type(p.Type).
+			Id(id).
+			Doc(p.Doc), nil
+	case "delete":
+		return elastic.NewBulkDeleteRequest().
+			Index(p.Index).
+			Routing(p.Routing).
+			Id(id).
+			Type(p.Type), nil
+	case "index":
+		return elastic.NewBulkIndexRequest().
+			Index(p.Index).
+			Pipeline(p.Pipeline).
+			Routing(p.Routing).
+			Type(p.Type).
+			Id(id).
+			Doc(p.Doc), nil
+	default:
+		return nil, fmt.Errorf("elasticsearch action '%s' is not allowed", p.Action)
+	}
 }
 
 //------------------------------------------------------------------------------

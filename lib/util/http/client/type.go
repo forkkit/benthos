@@ -16,9 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/metadata"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -26,28 +27,27 @@ import (
 	"github.com/Jeffail/benthos/v3/lib/util/http/auth"
 	"github.com/Jeffail/benthos/v3/lib/util/throttle"
 	"github.com/Jeffail/benthos/v3/lib/util/tls"
-	"github.com/opentracing/opentracing-go"
-	olog "github.com/opentracing/opentracing-go/log"
 )
 
 //------------------------------------------------------------------------------
 
 // Config is a configuration struct for an HTTP client.
 type Config struct {
-	URL                 string            `json:"url" yaml:"url"`
-	Verb                string            `json:"verb" yaml:"verb"`
-	Headers             map[string]string `json:"headers" yaml:"headers"`
-	CopyResponseHeaders bool              `json:"copy_response_headers" yaml:"copy_response_headers"`
-	RateLimit           string            `json:"rate_limit" yaml:"rate_limit"`
-	Timeout             string            `json:"timeout" yaml:"timeout"`
-	Retry               string            `json:"retry_period" yaml:"retry_period"`
-	MaxBackoff          string            `json:"max_retry_backoff" yaml:"max_retry_backoff"`
-	NumRetries          int               `json:"retries" yaml:"retries"`
-	BackoffOn           []int             `json:"backoff_on" yaml:"backoff_on"`
-	DropOn              []int             `json:"drop_on" yaml:"drop_on"`
-	SuccessfulOn        []int             `json:"successful_on" yaml:"successful_on"`
-	TLS                 tls.Config        `json:"tls" yaml:"tls"`
-	ProxyURL            string            `json:"proxy_url" yaml:"proxy_url"`
+	URL                 string                       `json:"url" yaml:"url"`
+	Verb                string                       `json:"verb" yaml:"verb"`
+	Headers             map[string]string            `json:"headers" yaml:"headers"`
+	CopyResponseHeaders bool                         `json:"copy_response_headers" yaml:"copy_response_headers"`
+	ExtractMetadata     metadata.IncludeFilterConfig `json:"extract_headers" yaml:"extract_headers"`
+	RateLimit           string                       `json:"rate_limit" yaml:"rate_limit"`
+	Timeout             string                       `json:"timeout" yaml:"timeout"`
+	Retry               string                       `json:"retry_period" yaml:"retry_period"`
+	MaxBackoff          string                       `json:"max_retry_backoff" yaml:"max_retry_backoff"`
+	NumRetries          int                          `json:"retries" yaml:"retries"`
+	BackoffOn           []int                        `json:"backoff_on" yaml:"backoff_on"`
+	DropOn              []int                        `json:"drop_on" yaml:"drop_on"`
+	SuccessfulOn        []int                        `json:"successful_on" yaml:"successful_on"`
+	TLS                 tls.Config                   `json:"tls" yaml:"tls"`
+	ProxyURL            string                       `json:"proxy_url" yaml:"proxy_url"`
 	auth.Config         `json:",inline" yaml:",inline"`
 	OAuth2              auth.OAuth2Config `json:"oauth2" yaml:"oauth2"`
 }
@@ -61,6 +61,7 @@ func NewConfig() Config {
 			"Content-Type": "application/octet-stream",
 		},
 		CopyResponseHeaders: false,
+		ExtractMetadata:     metadata.NewIncludeFilterConfig(),
 		RateLimit:           "",
 		Timeout:             "5s",
 		Retry:               "1s",
@@ -78,6 +79,9 @@ func NewConfig() Config {
 //------------------------------------------------------------------------------
 
 // Type is an output type that pushes messages to Type.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 type Type struct {
 	client *http.Client
 
@@ -116,14 +120,11 @@ type Type struct {
 }
 
 // New creates a new Type.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func New(conf Config, opts ...func(*Type)) (*Type, error) {
-	urlStr, err := bloblang.NewField(conf.URL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse URL expression: %v", err)
-	}
-
 	h := Type{
-		url:       urlStr,
 		conf:      conf,
 		log:       log.Noop(),
 		stats:     metrics.Noop(),
@@ -190,20 +191,25 @@ func New(conf Config, opts ...func(*Type)) (*Type, error) {
 		h.successOn[c] = struct{}{}
 	}
 
+	for _, opt := range opts {
+		opt(&h)
+	}
+
+	var err error
+	if h.url, err = interop.NewBloblangField(h.mgr, conf.URL); err != nil {
+		return nil, fmt.Errorf("failed to parse URL expression: %v", err)
+	}
+
 	for k, v := range conf.Headers {
 		if strings.EqualFold(k, "host") {
-			if h.host, err = bloblang.NewField(v); err != nil {
+			if h.host, err = interop.NewBloblangField(h.mgr, v); err != nil {
 				return nil, fmt.Errorf("failed to parse header 'host' expression: %v", err)
 			}
 		} else {
-			if h.headers[k], err = bloblang.NewField(v); err != nil {
+			if h.headers[k], err = interop.NewBloblangField(h.mgr, v); err != nil {
 				return nil, fmt.Errorf("failed to parse header '%v' expression: %v", k, err)
 			}
 		}
-	}
-
-	for _, opt := range opts {
-		opt(&h)
 	}
 
 	h.mCount = h.stats.GetCounter("count")
@@ -252,6 +258,9 @@ func New(conf Config, opts ...func(*Type)) (*Type, error) {
 
 // OptSetCloseChan sets a channel that when closed will interrupt any blocking
 // calls within the client.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func OptSetCloseChan(c <-chan struct{}) func(*Type) {
 	return func(t *Type) {
 		t.closeChan = c
@@ -259,6 +268,9 @@ func OptSetCloseChan(c <-chan struct{}) func(*Type) {
 }
 
 // OptSetLogger sets the logger to use.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func OptSetLogger(log log.Modular) func(*Type) {
 	return func(t *Type) {
 		t.log = log
@@ -266,6 +278,9 @@ func OptSetLogger(log log.Modular) func(*Type) {
 }
 
 // OptSetStats sets the metrics aggregator to use.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func OptSetStats(stats metrics.Type) func(*Type) {
 	return func(t *Type) {
 		t.stats = stats
@@ -292,6 +307,9 @@ func OptSetHTTPTransport(transport *http.Transport) func(*Type) {
 
 // OptSetRoundTripper sets the *client.Transport to use for HTTP requests.
 // NOTE: This setting will override any configured TLS options.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func OptSetRoundTripper(rt http.RoundTripper) func(*Type) {
 	return func(t *Type) {
 		t.client.Transport = rt
@@ -352,11 +370,14 @@ func (h *Type) waitForAccess() bool {
 }
 
 // CreateRequest creates an HTTP request out of a single message.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) CreateRequest(msg types.Message) (req *http.Request, err error) {
 	url := h.url.String(0, msg)
 
 	if msg == nil || msg.Len() == 0 {
-		if req, err = http.NewRequest(h.conf.Verb, url, nil); err == nil {
+		if req, err = http.NewRequest(h.conf.Verb, url, http.NoBody); err == nil {
 			for k, v := range h.headers {
 				req.Header.Add(k, v.String(0, msg))
 			}
@@ -416,6 +437,9 @@ func (h *Type) CreateRequest(msg types.Message) (req *http.Request, err error) {
 }
 
 // ParseResponse attempts to parse an HTTP response into a 2D slice of bytes.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) ParseResponse(res *http.Response) (resMsg types.Message, err error) {
 	resMsg = message.New(nil)
 
@@ -513,6 +537,9 @@ const (
 // checkStatus compares a returned status code against configured logic
 // determining whether the send succeeded, and if not what the retry strategy
 // should be.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) checkStatus(code int) (succeeded bool, retStrat retryStrategy) {
 	if _, exists := h.dropOn[code]; exists {
 		return false, noRetry
@@ -532,21 +559,23 @@ func (h *Type) checkStatus(code int) (succeeded bool, retStrat retryStrategy) {
 // Do attempts to create and perform an HTTP request from a message payload.
 // This attempt may include retries, and if all retries fail an error is
 // returned.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) Do(msg types.Message) (*http.Response, error) {
 	return h.DoWithContext(context.Background(), msg)
 }
 
 // DoWithContext is the context aware version of Do
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.Response, err error) {
 	h.mCount.Incr(1)
 
-	var spans []opentracing.Span
+	var spans []*tracing.Span
 	if msg != nil {
-		spans = make([]opentracing.Span, msg.Len())
-		msg.Iter(func(i int, p types.Part) error {
-			spans[i], _ = opentracing.StartSpanFromContext(message.GetContext(p), "http_request")
-			return nil
-		})
+		spans = tracing.CreateChildSpans("http_request", msg)
 		defer func() {
 			for _, s := range spans {
 				s.Finish()
@@ -555,9 +584,9 @@ func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.
 	}
 	logErr := func(e error) {
 		for _, s := range spans {
-			s.LogFields(
-				olog.String("event", "error"),
-				olog.String("type", e.Error()),
+			s.LogKV(
+				"event", "error",
+				"type", e.Error(),
 			)
 		}
 	}
@@ -569,6 +598,12 @@ func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.
 		logErr(err)
 		return nil, err
 	}
+	// Make sure we log the actual request URL
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%s: %w", req.URL, err)
+		}
+	}()
 
 	startedAt := time.Now()
 
@@ -585,7 +620,7 @@ func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.
 			if retryStrat == noRetry {
 				numRetries = 0
 			}
-			err = types.ErrUnexpectedHTTPRes{Code: res.StatusCode, S: res.Status}
+			err = UnexpectedErr(res)
 			if res.Body != nil {
 				res.Body.Close()
 			}
@@ -627,7 +662,7 @@ func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.
 				if retryStrat == noRetry {
 					j = 0
 				}
-				err = types.ErrUnexpectedHTTPRes{Code: res.StatusCode, S: res.Status}
+				err = UnexpectedErr(res)
 				if res.Body != nil {
 					res.Body.Close()
 				}
@@ -651,17 +686,32 @@ func (h *Type) DoWithContext(ctx context.Context, msg types.Message) (res *http.
 	return res, nil
 }
 
+// UnexpectedErr get error body
+func UnexpectedErr(res *http.Response) error {
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	return types.ErrUnexpectedHTTPRes{Code: res.StatusCode, S: res.Status, Body: body}
+}
+
 // Send attempts to send a message to an HTTP server, this attempt may include
 // retries, and if all retries fail an error is returned. The message payload
 // can be nil, in which case an empty body is sent. The response will be parsed
 // back into a message, meaning mulitpart content handling is done for you.
 //
 // If the response body is empty the message returned is nil.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) Send(msg types.Message) (types.Message, error) {
 	return h.SendWithContext(context.Background(), msg)
 }
 
 // SendWithContext is the context aware version of Send
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) SendWithContext(ctx context.Context, msg types.Message) (types.Message, error) {
 	res, err := h.DoWithContext(ctx, msg)
 	if err != nil {
@@ -671,6 +721,9 @@ func (h *Type) SendWithContext(ctx context.Context, msg types.Message) (types.Me
 }
 
 // CloseAsync closes the HTTP client and all managed resources.
+//
+// Deprecated: This component is no longer used by Benthos, instead look at
+// ./internal/http.
 func (h *Type) CloseAsync() {
 	h.done()
 }

@@ -1,11 +1,14 @@
 package processor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/http"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -63,16 +66,16 @@ will not be reattempted and is immediately considered a failed request.
 If the request returns an error response code this processor sets a metadata
 field ` + "`http_status_code`" + ` on the resulting message.
 
-If the field ` + "`copy_response_headers` is set to `true`" + ` then any headers
-in the response will also be set in the resulting message as metadata.
- 
+Use the field ` + "`extract_headers`" + ` to specify rules for which other
+headers should be copied into the resulting message from the response.
+
 ## Error Handling
 
 When all retry attempts for a message are exhausted the processor cancels the
 attempt. These failed messages will continue through the pipeline unchanged, but
 can be dropped or placed in a dead letter queue according to your config, you
 can read about these patterns [here](/docs/configuration/error_handling).`,
-		FieldSpecs: append(docs.FieldSpecs{
+		config: client.FieldSpec(
 			docs.FieldCommon("parallel", "When processing batched messages, whether to send messages of the batch in parallel, otherwise they are sent within a single request."),
 			docs.FieldDeprecated("max_parallel"),
 			docs.FieldDeprecated("request").OmitWhen(func(v, _ interface{}) (string, bool) {
@@ -86,7 +89,7 @@ can read about these patterns [here](/docs/configuration/error_handling).`,
 				}
 				return "field request is deprecated", cmp.Equal(v, iDefault)
 			}),
-		}, client.FieldSpecs()...),
+		),
 		Examples: []docs.AnnotatedExample{
 			{
 				Title: "Branched Request",
@@ -133,7 +136,7 @@ func NewHTTPConfig() HTTPConfig {
 // HTTP is a processor that performs an HTTP request using the message as the
 // request body, and returns the response.
 type HTTP struct {
-	client *client.Type
+	client *http.Client
 
 	parallel bool
 	max      int
@@ -175,12 +178,12 @@ func NewHTTP(
 		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 	var err error
-	if g.client, err = client.New(
+	if g.client, err = http.NewClient(
 		conf.HTTP.Config,
-		client.OptSetLogger(g.log),
+		http.OptSetLogger(g.log),
 		// TODO: V4 Remove this
-		client.OptSetStats(metrics.Namespaced(g.stats, "client")),
-		client.OptSetManager(mgr),
+		http.OptSetStats(metrics.Namespaced(g.stats, "client")),
+		http.OptSetManager(mgr),
 	); err != nil {
 		return nil, err
 	}
@@ -197,15 +200,16 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 
 	if !h.parallel || msg.Len() == 1 {
 		// Easy, just do a single request.
-		resultMsg, err := h.client.Send(msg)
+		resultMsg, err := h.client.Send(context.Background(), msg, msg)
 		if err != nil {
 			var codeStr string
-			if hErr, ok := err.(types.ErrUnexpectedHTTPRes); ok {
+			var hErr types.ErrUnexpectedHTTPRes
+			if ok := errors.As(err, &hErr); ok {
 				codeStr = strconv.Itoa(hErr.Code)
 			}
 			h.mErr.Incr(1)
 			h.mErrHTTP.Incr(1)
-			h.log.Errorf("HTTP request to '%v' failed: %v\n", h.conf.HTTP.URL, err)
+			h.log.Errorf("HTTP request failed: %v\n", err)
 			responseMsg = msg.Copy()
 			responseMsg.Iter(func(i int, p types.Part) error {
 				if len(codeStr) > 0 {
@@ -249,7 +253,8 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 		for i := 0; i < max; i++ {
 			go func() {
 				for index := range reqChan {
-					result, err := h.client.Send(message.Lock(msg, index))
+					tmpMsg := message.Lock(msg, index)
+					result, err := h.client.Send(context.Background(), tmpMsg, tmpMsg)
 					if err == nil && result.Len() != 1 {
 						err = fmt.Errorf("unexpected response size: %v", result.Len())
 					}
@@ -260,7 +265,8 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 							return nil
 						})
 					} else {
-						if hErr, ok := err.(types.ErrUnexpectedHTTPRes); ok {
+						var hErr types.ErrUnexpectedHTTPRes
+						if ok := errors.As(err, &hErr); ok {
 							results[index].Metadata().Set("http_status_code", strconv.Itoa(hErr.Code))
 						}
 						FlagErr(results[index], err)
@@ -302,7 +308,7 @@ func (h *HTTP) ProcessMessage(msg types.Message) ([]types.Message, types.Respons
 
 // CloseAsync shuts down the processor and stops processing requests.
 func (h *HTTP) CloseAsync() {
-	h.client.CloseAsync()
+	go h.client.Close(context.Background())
 }
 
 // WaitForClose blocks until the processor has closed down.

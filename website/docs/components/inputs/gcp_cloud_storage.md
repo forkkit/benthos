@@ -15,7 +15,9 @@ categories: ["Services","GCP"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-BETA: This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::caution BETA
+This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::
 
 Downloads objects within a Google Cloud Storage bucket, optionally filtered by a prefix.
 
@@ -79,7 +81,7 @@ You can access these metadata fields using [function interpolation](/docs/config
 ### Credentials
 
 By default Benthos will use a shared credentials file when connecting to GCP
-services. You can find out more [in this document](/docs/guides/gcp).
+services. You can find out more [in this document](/docs/guides/cloud/gcp).
 
 ## Fields
 
@@ -113,6 +115,7 @@ Default: `"all-bytes"`
 | `all-bytes` | Consume the entire file as a single binary message. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
+| `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `csv:|` would consume a pipe delimited file. |
 | `delim:x` | Consume the file in segments divided by a custom delimiter. |
 | `gzip` | Decompress a gzip file, this codec should precede another codec, e.g. `gzip/all-bytes`, `gzip/tar`, `gzip/csv`, etc. |
 | `lines` | Consume the file in segments divided by linebreaks. |

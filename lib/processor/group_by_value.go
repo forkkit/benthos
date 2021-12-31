@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
 	"github.com/Jeffail/benthos/v3/lib/types"
-	olog "github.com/opentracing/opentracing-go/log"
 )
 
 //------------------------------------------------------------------------------
@@ -102,7 +101,7 @@ type GroupByValue struct {
 func NewGroupByValue(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	value, err := bloblang.NewField(conf.GroupByValue.Value)
+	value, err := interop.NewBloblangField(mgr, conf.GroupByValue.Value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
 	}
@@ -137,9 +136,9 @@ func (g *GroupByValue) ProcessMessage(msg types.Message) ([]types.Message, types
 
 	msg.Iter(func(i int, p types.Part) error {
 		v := g.value.String(i, msg)
-		spans[i].LogFields(
-			olog.String("event", "grouped"),
-			olog.String("type", v),
+		spans[i].LogKV(
+			"event", "grouped",
+			"type", v,
 		)
 		spans[i].SetTag("group", v)
 		if group, exists := groupMap[v]; exists {

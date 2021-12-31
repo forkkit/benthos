@@ -8,7 +8,6 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/interop/plugins"
 	"github.com/Jeffail/gabs/v2"
-	"gopkg.in/yaml.v3"
 )
 
 const labelExpression = `^[a-z0-9_]+$`
@@ -31,7 +30,7 @@ func ValidateLabel(label string) error {
 	return nil
 }
 
-var labelField = FieldCommon(
+var labelField = FieldString(
 	"label", "An optional label to use as an identifier for observability data such as metrics and logging.",
 ).OmitWhen(func(field, parent interface{}) (string, bool) {
 	gObj := gabs.Wrap(parent)
@@ -52,23 +51,23 @@ var labelField = FieldCommon(
 			NewLintError(line, fmt.Sprintf("Invalid label '%v': %v", l, err)),
 		}
 	}
-	prevLine, exists := ctx.Labels[l]
+	prevLine, exists := ctx.LabelsToLine[l]
 	if exists {
 		return []Lint{
 			NewLintError(line, fmt.Sprintf("Label '%v' collides with a previously defined label at line %v", l, prevLine)),
 		}
 	}
-	ctx.Labels[l] = line
+	ctx.LabelsToLine[l] = line
 	return nil
 })
 
 func reservedFieldsByType(t Type) map[string]FieldSpec {
 	m := map[string]FieldSpec{
-		"type":   FieldCommon("type", "").HasType(FieldString),
-		"plugin": FieldCommon("plugin", "").HasType(FieldObject),
+		"type":   FieldString("type", ""),
+		"plugin": FieldCommon("plugin", "").HasType(FieldTypeObject),
 	}
 	if t == TypeInput || t == TypeOutput {
-		m["processors"] = FieldCommon("processors", "").Array().HasType(FieldProcessor).OmitWhen(func(field, _ interface{}) (string, bool) {
+		m["processors"] = FieldCommon("processors", "").Array().HasType(FieldTypeProcessor).OmitWhen(func(field, _ interface{}) (string, bool) {
 			if arr, ok := field.([]interface{}); ok && len(arr) == 0 {
 				return "field processors is empty and can be removed", true
 			}
@@ -87,6 +86,7 @@ func reservedFieldsByType(t Type) map[string]FieldSpec {
 	return m
 }
 
+// TODO: V4 remove this as it's not needed.
 func refreshOldPlugins() {
 	plugins.FlushNameTypes(func(nt [2]string) {
 		RegisterDocs(ComponentSpec{
@@ -100,16 +100,14 @@ func refreshOldPlugins() {
 
 // GetInferenceCandidate checks a generic config structure for a component and
 // returns either the inferred type name or an error if one cannot be inferred.
-func GetInferenceCandidate(t Type, defaultType string, raw interface{}) (string, ComponentSpec, error) {
-	refreshOldPlugins()
-
+func GetInferenceCandidate(docProvider Provider, t Type, defaultType string, raw interface{}) (string, ComponentSpec, error) {
 	m, ok := raw.(map[string]interface{})
 	if !ok {
 		return "", ComponentSpec{}, fmt.Errorf("invalid config value %T, expected object", raw)
 	}
 
 	if tStr, ok := m["type"].(string); ok {
-		spec, exists := GetDocs(tStr, t)
+		spec, exists := GetDocs(docProvider, tStr, t)
 		if !exists {
 			return "", ComponentSpec{}, fmt.Errorf("%v type '%v' was not recognised", string(t), tStr)
 		}
@@ -121,36 +119,10 @@ func GetInferenceCandidate(t Type, defaultType string, raw interface{}) (string,
 		keys = append(keys, k)
 	}
 
-	return getInferenceCandidateFromList(t, defaultType, keys)
+	return getInferenceCandidateFromList(docProvider, t, defaultType, keys)
 }
 
-// GetInferenceCandidateFromNode checks a yaml node config structure for a
-// component and returns either the inferred type name or an error if one cannot
-// be inferred.
-func GetInferenceCandidateFromNode(t Type, defaultType string, node *yaml.Node) (string, ComponentSpec, error) {
-	refreshOldPlugins()
-
-	if node.Kind != yaml.MappingNode {
-		return "", ComponentSpec{}, fmt.Errorf("invalid type %v, expected object", node.Kind)
-	}
-
-	var keys []string
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "type" {
-			tStr := node.Content[i+1].Value
-			spec, exists := GetDocs(tStr, t)
-			if !exists {
-				return "", ComponentSpec{}, fmt.Errorf("%v type '%v' was not recognised", string(t), tStr)
-			}
-			return tStr, spec, nil
-		}
-		keys = append(keys, node.Content[i].Value)
-	}
-
-	return getInferenceCandidateFromList(t, defaultType, keys)
-}
-
-func getInferenceCandidateFromList(t Type, defaultType string, l []string) (string, ComponentSpec, error) {
+func getInferenceCandidateFromList(docProvider Provider, t Type, defaultType string, l []string) (string, ComponentSpec, error) {
 	ignore := reservedFieldsByType(t)
 
 	var candidates []string
@@ -161,7 +133,7 @@ func getInferenceCandidateFromList(t Type, defaultType string, l []string) (stri
 			continue
 		}
 		candidates = append(candidates, k)
-		if spec, exists := GetDocs(k, t); exists {
+		if spec, exists := GetDocs(docProvider, k, t); exists {
 			if len(inferred) > 0 {
 				candidates = []string{inferred, k}
 				sort.Strings(candidates)
@@ -177,7 +149,7 @@ func getInferenceCandidateFromList(t Type, defaultType string, l []string) (stri
 	if len(candidates) == 0 && len(defaultType) > 0 {
 		// A totally empty component config results in the default.
 		// TODO: V4 Disable this
-		if spec, exists := GetDocs(defaultType, t); exists {
+		if spec, exists := GetDocs(docProvider, defaultType, t); exists {
 			return defaultType, spec, nil
 		}
 	}
@@ -187,34 +159,6 @@ func getInferenceCandidateFromList(t Type, defaultType string, l []string) (stri
 		return "", ComponentSpec{}, fmt.Errorf("unable to infer %v type, candidates were: %v", string(t), candidates)
 	}
 	return inferred, inferredSpec, nil
-}
-
-// GetPluginConfigNode extracts a plugin configuration node from a component
-// config. This exists because there are two styles of plugin config, the old
-// style (within `plugin`):
-//
-// type: foo
-// plugin:
-//   bar: baz
-//
-// And the new style:
-//
-// foo:
-//   bar: baz
-//
-func GetPluginConfigNode(name string, value *yaml.Node) (yaml.Node, error) {
-	for i := 0; i < len(value.Content)-1; i += 2 {
-		if value.Content[i].Value == name {
-			return *value.Content[i+1], nil
-		}
-	}
-	pluginStruct := struct {
-		Plugin yaml.Node `yaml:"plugin"`
-	}{}
-	if err := value.Decode(&pluginStruct); err != nil {
-		return yaml.Node{}, err
-	}
-	return pluginStruct.Plugin, nil
 }
 
 // TODO: V4 Remove this.
@@ -237,35 +181,6 @@ func sanitiseConditionConfig(raw interface{}, removeDeprecated bool) error {
 	return nil
 }
 
-// TODO: V4 Remove this.
-func sanitiseConditionConfigNode(node *yaml.Node) error {
-	// This is a nasty hack until Benthos v4.
-	newNodes := []*yaml.Node{}
-
-	var name string
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "type" {
-			name = node.Content[i+1].Value
-			newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-			break
-		}
-	}
-
-	if name == "" {
-		return nil
-	}
-
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == name {
-			newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-			break
-		}
-	}
-
-	node.Content = newNodes
-	return nil
-}
-
 // SanitiseComponentConfig reduces a raw component configuration into only the
 // fields for the component name configured.
 //
@@ -275,7 +190,7 @@ func SanitiseComponentConfig(componentType Type, raw interface{}, filter FieldFi
 		return sanitiseConditionConfig(raw, false)
 	}
 
-	name, spec, err := GetInferenceCandidate(componentType, "", raw)
+	name, spec, err := GetInferenceCandidate(globalProvider, componentType, "", raw)
 	if err != nil {
 		return err
 	}
@@ -316,177 +231,11 @@ type SanitiseConfig struct {
 	RemoveDeprecated bool
 	ForExample       bool
 	Filter           FieldFilter
+	DocsProvider     Provider
 }
 
-// SanitiseNode takes a yaml.Node and a config spec and sorts the fields of the
-// node according to the spec. Also optionally removes the `type` field from
-// this and all nested components.
-func SanitiseNode(cType Type, node *yaml.Node, conf SanitiseConfig) error {
-	if cType == "condition" {
-		return sanitiseConditionConfigNode(node)
-	}
-
-	newNodes := []*yaml.Node{}
-
-	var name string
-	var keys []string
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "label" {
-			if _, omit := labelField.shouldOmitNode(node.Content[i+1], node); !omit {
-				newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-			}
-			break
-		}
-	}
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "type" {
-			name = node.Content[i+1].Value
-			if !conf.RemoveTypeField {
-				newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-			}
-			break
-		} else {
-			keys = append(keys, node.Content[i].Value)
-		}
-	}
-	if name == "" {
-		if len(node.Content) == 0 {
-			return nil
-		}
-		var err error
-		if name, _, err = getInferenceCandidateFromList(cType, "", keys); err != nil {
-			return err
-		}
-	}
-
-	cSpec, exists := GetDocs(name, cType)
-	if !exists {
-		return fmt.Errorf("failed to obtain docs for %v type %v", cType, name)
-	}
-
-	nameFound := false
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "plugin" && cSpec.Plugin {
-			node.Content[i].Value = name
-		}
-
-		if node.Content[i].Value != name {
-			continue
-		}
-
-		nameFound = true
-		if err := cSpec.Config.SanitiseNode(node.Content[i+1], conf); err != nil {
-			return err
-		}
-		newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-		break
-	}
-
-	// If the type field was omitted but we didn't see a config under the name
-	// then we need to add an empty object.
-	if !nameFound && conf.RemoveTypeField {
-		var keyNode yaml.Node
-		if err := keyNode.Encode(name); err != nil {
-			return err
-		}
-		bodyNode, err := cSpec.Config.ToNode(conf.ForExample)
-		if err != nil {
-			return err
-		}
-		if err := cSpec.Config.SanitiseNode(bodyNode, conf); err != nil {
-			return err
-		}
-		newNodes = append(newNodes, &keyNode, bodyNode)
-	}
-
-	reservedFields := reservedFieldsByType(cType)
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == name || node.Content[i].Value == "type" || node.Content[i].Value == "label" {
-			continue
-		}
-		if spec, exists := reservedFields[node.Content[i].Value]; exists {
-			if _, omit := spec.shouldOmitNode(node.Content[i+1], node); omit {
-				continue
-			}
-			if err := spec.SanitiseNode(node.Content[i+1], conf); err != nil {
-				return err
-			}
-			newNodes = append(newNodes, node.Content[i], node.Content[i+1])
-		}
-	}
-
-	node.Content = newNodes
-	return nil
-}
-
-// LintNode takes a yaml.Node and a config spec and returns a list of linting
-// errors found in the config.
-func LintNode(ctx LintContext, cType Type, node *yaml.Node) []Lint {
-	if cType == "condition" {
-		return nil
-	}
-
-	var lints []Lint
-
-	var name string
-	var keys []string
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == "type" {
-			name = node.Content[i+1].Value
-			break
-		} else {
-			keys = append(keys, node.Content[i].Value)
-		}
-	}
-	if name == "" {
-		if len(node.Content) == 0 {
-			return nil
-		}
-		var err error
-		if name, _, err = getInferenceCandidateFromList(cType, "", keys); err != nil {
-			lints = append(lints, NewLintWarning(node.Line, "unable to infer component type"))
-			return lints
-		}
-	}
-
-	cSpec, exists := GetDocs(name, cType)
-	if !exists {
-		lints = append(lints, NewLintWarning(node.Line, fmt.Sprintf("failed to obtain docs for %v type %v", cType, name)))
-		return lints
-	}
-
-	nameFound := false
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == name {
-			nameFound = true
-			lints = append(lints, cSpec.Config.lintNode(ctx, node.Content[i+1])...)
-			break
-		}
-	}
-
-	reservedFields := reservedFieldsByType(cType)
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		if node.Content[i].Value == name || node.Content[i].Value == "type" {
-			continue
-		}
-		if node.Content[i].Value == "plugin" {
-			if nameFound || !cSpec.Plugin {
-				lints = append(lints, NewLintError(node.Content[i].Line, "plugin object is ineffective"))
-			} else {
-				lints = append(lints, cSpec.Config.lintNode(ctx, node.Content[i+1])...)
-			}
-		}
-		spec, exists := reservedFields[node.Content[i].Value]
-		if exists {
-			lints = append(lints, lintFromOmit(spec, node, node.Content[i+1])...)
-			lints = append(lints, spec.lintNode(ctx, node.Content[i+1])...)
-		} else {
-			lints = append(lints, NewLintError(
-				node.Content[i].Line,
-				fmt.Sprintf("field %v is invalid when the component type is %v (%v)", node.Content[i].Value, name, cType),
-			))
-		}
-	}
-
-	return lints
+// GetDocs attempts to obtain documentation for a component implementation from
+// a docs provider in the config, or if omitted uses the global provider.
+func (c SanitiseConfig) GetDocs(name string, ctype Type) (ComponentSpec, bool) {
+	return GetDocs(c.DocsProvider, name, ctype)
 }

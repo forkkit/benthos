@@ -14,8 +14,9 @@ status: experimental
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Use a MongoDB instance as a cache.
 
 Introduced in version 3.43.0.
@@ -24,7 +25,7 @@ Introduced in version 3.43.0.
 # Config fields, showing default values
 label: ""
 mongodb:
-  url: mongodb://localhost:27017
+  url: ""
   database: ""
   collection: ""
   username: ""
@@ -41,7 +42,7 @@ The URL of the target MongoDB DB.
 
 
 Type: `string`  
-Default: `"mongodb://localhost:27017"`  
+Default: `""`  
 
 ```yaml
 # Examples

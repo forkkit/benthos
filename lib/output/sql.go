@@ -5,13 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message/batch"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -20,6 +21,7 @@ import (
 
 	// SQL Drivers
 	_ "github.com/ClickHouse/clickhouse-go"
+	_ "github.com/denisenkom/go-mssqldb"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -28,7 +30,14 @@ import (
 func init() {
 	Constructors[TypeSQL] = TypeSpec{
 		constructor: fromSimpleConstructor(func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-			s, err := newSQLWriter(conf.SQL, log)
+			if conf.SQL.Driver == "mssql" {
+				// For MSSQL, if the user part of the connection string is in the
+				// `DOMAIN\username` format, then the backslash character needs
+				// to be URL-encoded.
+				conf.SQL.DataSourceName = strings.ReplaceAll(conf.SQL.DataSourceName, `\`, "%5C")
+			}
+
+			s, err := newSQLWriter(conf.SQL, mgr, log)
 			if err != nil {
 				return nil, err
 			}
@@ -59,6 +68,7 @@ The following is a list of supported drivers and their respective DSN formats:
 ` + "| `clickhouse` | [`tcp://[netloc][:port][?param1=value1&...&paramN=valueN]`](https://github.com/ClickHouse/clickhouse-go#dsn)" + `
 ` + "| `mysql` | `[username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]` |" + `
 ` + "| `postgres` | `postgres://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]` |" + `
+` + "| `mssql` | `sqlserver://[user[:password]@][netloc][:port][?database=dbname&param1=value1&...]` |" + `
 
 Please note that the ` + "`postgres`" + ` driver enforces SSL by default, you can override this with the parameter ` + "`sslmode=disable`" + ` if required.`,
 		Examples: []docs.AnnotatedExample{
@@ -99,17 +109,13 @@ output:
 			docs.FieldCommon(
 				"driver",
 				"A database [driver](#drivers) to use.",
-			).HasOptions("mysql", "postgres", "clickhouse"),
+			).HasOptions("mysql", "postgres", "clickhouse", "mssql"),
 			docs.FieldCommon(
 				"data_source_name", "A Data Source Name to identify the target database.",
 				"tcp://host1:9000?username=user&password=qwerty&database=clicks&read_timeout=10&write_timeout=20&alt_hosts=host2:9000,host3:9000",
 				"foouser:foopassword@tcp(localhost:3306)/foodb",
 				"postgres://foouser:foopass@localhost:5432/foodb?sslmode=disable",
 			),
-			docs.FieldDeprecated("dsn").OmitWhen(func(v, _ interface{}) (string, bool) {
-				s, ok := v.(string)
-				return "field dsn is deprecated in favour of data_source_name", ok && s == ""
-			}),
 			docs.FieldCommon(
 				"query", "The query to run against the database.",
 				"INSERT INTO footable (foo, bar, baz) VALUES (?, ?, ?);",
@@ -118,12 +124,12 @@ output:
 				"args",
 				"A list of arguments for the query to be resolved for each message.",
 			).IsInterpolated().Array(),
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"args_mapping",
 				"A [Bloblang mapping](/docs/guides/bloblang/about) that produces the arguments for the query. The mapping must return an array containing the number of arguments in the query.",
 				`[ this.foo, this.bar.not_empty().catch(null), meta("baz") ]`,
 				`root = [ uuid_v4() ].merge(this.document.args)`,
-			).HasType(docs.FieldString).Linter(docs.LintBloblangMapping).AtVersion("3.47.0"),
+			).AtVersion("3.47.0"),
 			docs.FieldCommon("max_in_flight", "The maximum number of messages to have in flight at a given time. Increase this to improve throughput."),
 			batch.FieldSpec(),
 		},
@@ -179,14 +185,14 @@ type sqlWriter struct {
 	query *sql.Stmt
 }
 
-func newSQLWriter(conf SQLConfig, log log.Modular) (*sqlWriter, error) {
+func newSQLWriter(conf SQLConfig, mgr types.Manager, log log.Modular) (*sqlWriter, error) {
 	if len(conf.Args) > 0 && conf.ArgsMapping != "" {
 		return nil, errors.New("cannot specify both `args` and an `args_mapping` in the same output")
 	}
 
 	var args []*field.Expression
 	for i, v := range conf.Args {
-		expr, err := bloblang.NewField(v)
+		expr, err := interop.NewBloblangField(mgr, v)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse arg %v expression: %v", i, err)
 		}
@@ -196,7 +202,7 @@ func newSQLWriter(conf SQLConfig, log log.Modular) (*sqlWriter, error) {
 	var argsMapping *mapping.Executor
 	if conf.ArgsMapping != "" {
 		var err error
-		if argsMapping, err = bloblang.NewMapping("", conf.ArgsMapping); err != nil {
+		if argsMapping, err = interop.NewBloblangMapping(mgr, conf.ArgsMapping); err != nil {
 			return nil, fmt.Errorf("failed to parse `args_mapping`: %w", err)
 		}
 	}

@@ -15,7 +15,9 @@ categories: ["Services","Azure"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-BETA: This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::caution BETA
+This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::
 
 Dequeue objects from an Azure Storage Queue.
 
@@ -56,6 +58,7 @@ input:
     queue_name: ""
     dequeue_visibility_timeout: 30s
     max_in_flight: 10
+    track_properties: false
 ```
 
 </TabItem>
@@ -67,6 +70,8 @@ This input adds the following metadata fields to each message:
 
 ```
 - queue_storage_insertion_time
+- queue_storage_queue_name
+- queue_storage_message_lag (if 'track_properties' set to true)
 - All user defined queue metadata
 ```
 
@@ -130,5 +135,13 @@ The maximum number of unprocessed messages to fetch at a given time.
 
 Type: `int`  
 Default: `10`  
+
+### `track_properties`
+
+If set to `true` the queue is polled on each read request for information such as the queue message lag. These properties are added to consumed messages as metadata, but will also have a negative performance impact.
+
+
+Type: `bool`  
+Default: `false`  
 
 

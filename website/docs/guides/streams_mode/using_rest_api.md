@@ -2,13 +2,9 @@
 title: Streams Via REST API
 ---
 
-By using the Benthos `streams` mode REST API you can dynamically control which
-streams are active at runtime. The full spec for the Benthos streams mode REST
-API can be [found here][http-interface].
+By using the Benthos `streams` mode REST API you can dynamically control which streams are active at runtime. The full spec for the Benthos streams mode REST API can be [found here][http-interface].
 
-Note that stream configs created and updated using this API do *not* benefit
-from [environment variable interpolation][interpolation] (function interpolation
-will still work).
+Note that stream configs created and updated using this API do *not* benefit from [environment variable interpolation][interpolation] (function interpolation will still work).
 
 ## Walkthrough
 
@@ -18,31 +14,28 @@ Start by running Benthos in streams mode:
 $ benthos streams
 ```
 
-On a separate terminal we can add our first stream `foo` by `POST`ing a JSON or
-YAML config to the `/streams/foo` endpoint:
+On a separate terminal we can add our first stream `foo` by `POST`ing a JSON or YAML config to the `/streams/foo` endpoint:
 
 ```bash
 $ curl http://localhost:4195/streams/foo -X POST --data-binary @- <<EOF
 input:
-  type: http_server
+  http_server: {}
 buffer:
-  type: memory
+  memory: {}
 pipeline:
   threads: 4
   processors:
-  - type: bloblang
-    bloblang: |
-      root = {
-        "id": this.user.id,
-        "content": this.body.content
-      }
+    - bloblang: |
+        root = {
+          "id": this.user.id,
+          "content": this.body.content
+        }
 output:
-  type: http_server
+  http_server: {}
 EOF
 ```
 
-Now we can check the full set of streams loaded by `GET`ing the `/streams`
-endpoint:
+Now we can check the full set of streams loaded by `GET`ing the `/streams` endpoint:
 
 ```bash
 $ curl http://localhost:4195/streams | jq '.'
@@ -66,24 +59,19 @@ Good, now let's add another stream `bar` the same way:
 ```bash
 $ curl http://localhost:4195/streams/bar -X POST --data-binary @- <<EOF
 input:
-  type: kafka
   kafka:
     addresses:
-    - localhost:9092
+      - localhost:9092
     topics:
-    - my_topic
-buffer:
-  type: none
+      - my_topic
 pipeline:
   threads: 1
   processors:
-  - type: bloblang
-    bloblang: 'root = this.uppercase()'
+    - bloblang: 'root = this.uppercase()'
 output:
-  type: elasticsearch
   elasticsearch:
     urls:
-    - http://localhost:9200
+      - http://localhost:9200
 EOF
 ```
 
@@ -105,8 +93,7 @@ $ curl http://localhost:4195/streams | jq '.'
 }
 ```
 
-It's also possible to get the configuration of a loaded stream by `GET`ing the
-path `/streams/{id}`:
+It's also possible to get the configuration of a loaded stream by `GET`ing the path `/streams/{id}`:
 
 ```bash
 $ curl http://localhost:4195/streams/foo | jq '.'
@@ -116,7 +103,6 @@ $ curl http://localhost:4195/streams/foo | jq '.'
   "uptime_str": "30.123488951s"
   "config": {
     "input": {
-      "type": "http_server",
       "http_server": {
         "address": "",
         "cert_file": "",
@@ -126,7 +112,6 @@ $ curl http://localhost:4195/streams/foo | jq '.'
       }
     },
     "buffer": {
-      "type": "memory",
       "memory": {
         "limit": 10000000
       }
@@ -136,31 +121,26 @@ $ curl http://localhost:4195/streams/foo | jq '.'
 }
 ```
 
-Next, we might want to update stream `foo` by `PUT`ing a new config to the path
-`/streams/foo`:
+Next, we might want to update stream `foo` by `PUT`ing a new config to the path `/streams/foo`:
 
 ```bash
 $ curl http://localhost:4195/streams/foo -X PUT --data-binary @- <<EOF
 input:
-  type: http_server
-buffer:
-  type: none
+  http_server: {}
 pipeline:
   threads: 4
   processors:
-  - type: bloblang
-    bloblang: |
+  - bloblang: |
       root = {
         "id": this.user.id,
         "content": this.body.content
       }
 output:
-  type: http_server
+  http_server: {}
 EOF
 ```
 
-We have removed the memory buffer with this change, let's check that the config
-has actually been updated:
+We have removed the memory buffer with this change, let's check that the config has actually been updated:
 
 ```bash
 $ curl http://localhost:4195/streams/foo | jq '.'
@@ -170,7 +150,6 @@ $ curl http://localhost:4195/streams/foo | jq '.'
   "uptime_str": "12.328482951s"
   "config": {
     "input": {
-      "type": "http_server",
       "http_server": {
         "address": "",
         "cert_file": "",
@@ -187,8 +166,7 @@ $ curl http://localhost:4195/streams/foo | jq '.'
 }
 ```
 
-Good, we are done with stream `bar` now, so let's delete it by `DELETE`ing the
-`/streams/bar` endpoint:
+Good, we are done with stream `bar` now, so let's delete it by `DELETE`ing the `/streams/bar` endpoint:
 
 ```bash
 $ curl http://localhost:4195/streams/bar -X DELETE
@@ -207,27 +185,23 @@ $ curl http://localhost:4195/streams | jq '.'
 }
 ```
 
-Great. Another useful feature is `POST`ing to `/streams`, this allows us to set
-the entire set of streams with a single request.
+Great. Another useful feature is `POST`ing to `/streams`, this allows us to set the entire set of streams with a single request.
 
-The payload is a map of stream ids to configurations and this will become the
-exclusive set of active streams. If there are existing streams that are not on
-the list they will be removed.
+The payload is a map of stream ids to configurations and this will become the exclusive set of active streams. If there are existing streams that are not on the list they will be removed.
 
 ```bash
 $ curl http://localhost:4195/streams -X POST --data-binary @- <<EOF
 bar:
   input:
-    type: http_client
     http_client:
       url: http://localhost:4195/baz/get
   output:
-    type: stdout
+    stdout: {}
 baz:
   input:
-    type: http_server
+    http_server: {}
   output:
-    type: http_server
+    http_server: {}
 EOF
 ```
 

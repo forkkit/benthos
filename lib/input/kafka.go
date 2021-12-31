@@ -55,13 +55,21 @@ This input adds the following metadata fields to each message:
 
 The field ` + "`kafka_lag`" + ` is the calculated difference between the high water mark offset of the partition at the time of ingestion and the current message offset.
 
-You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).`,
+You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).
+
+### Troubleshooting
+
+If you're seeing issues writing to or reading from Kafka with this component then it's worth trying out the newer ` + "[`kafka_franz` input](/docs/components/inputs/kafka_franz)" + `.
+
+- I'm seeing logs that report ` + "`Failed to connect to kafka: kafka: client has run out of available brokers to talk to (Is your cluster reachable?)`" + `, but the brokers are definitely reachable.
+
+Unfortunately this error message will appear for a wide range of connection problems even when the broker endpoint can be reached. Double check your authentication configuration and also ensure that you have [enabled TLS](#tlsenabled) if applicable.`,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon(
+			docs.FieldString(
 				"addresses", "A list of broker addresses to connect to. If an item of the list contains commas it will be expanded into multiple addresses.",
 				[]string{"localhost:9092"}, []string{"localhost:9041,localhost:9042"}, []string{"localhost:9041", "localhost:9042"},
 			).Array(),
-			docs.FieldCommon(
+			docs.FieldString(
 				"topics",
 				"A list of topics to consume from. Multiple comma separated topics can be listed in a single element. Partitions are automatically distributed across consumers of a topic. Alternatively, it's possible to specify explicit partitions to consume from with a colon after the topic name, e.g. `foo:0` would consume the partition 0 of the topic foo. This syntax supports ranges, e.g. `foo:0-10` would consume partitions 0 through to 10 inclusive.",
 				[]string{"foo", "bar"},
@@ -70,13 +78,15 @@ You can access these metadata fields using [function interpolation](/docs/config
 				[]string{"foo:0,bar:1,bar:3"},
 				[]string{"foo:0-5"},
 			).AtVersion("3.33.0").Array(),
+			docs.FieldString("target_version", "The version of the Kafka protocol to use. This limits the capabilities used by the client and should ideally match the version of your brokers."),
 			btls.FieldSpec(),
 			sasl.FieldSpec(),
 			docs.FieldCommon("consumer_group", "An identifier for the consumer group of the connection. This field can be explicitly made empty in order to disable stored offsets for the consumed topic partitions."),
 			docs.FieldCommon("client_id", "An identifier for the client connection."),
+			docs.FieldAdvanced("rack_id", "A rack identifier for this client."),
 			docs.FieldAdvanced("start_from_oldest", "If an offset is not found for a topic partition, determines whether to consume from the oldest available offset, otherwise messages are consumed from the latest offset."),
 			docs.FieldCommon(
-				"checkpoint_limit", "EXPERIMENTAL: The maximum number of messages of the same topic and partition that can be processed at a given time. Increasing this limit enables parallel processing and batching at the output level to work on individual partitions. Any given offset will not be committed unless all messages under that offset are delivered in order to preserve at least once delivery guarantees.",
+				"checkpoint_limit", "The maximum number of messages of the same topic and partition that can be processed at a given time. Increasing this limit enables parallel processing and batching at the output level to work on individual partitions. Any given offset will not be committed unless all messages under that offset are delivered in order to preserve at least once delivery guarantees.",
 			).AtVersion("3.33.0"),
 			docs.FieldAdvanced("commit_period", "The period of time between each commit of the current partition offsets. Offsets are always committed during shutdown."),
 			docs.FieldAdvanced("max_processing_period", "A maximum estimate for the time taken to process a message, this is used for tuning consumer group synchronization."),
@@ -87,10 +97,9 @@ You can access these metadata fields using [function interpolation](/docs/config
 				docs.FieldAdvanced("rebalance_timeout", "A period after which rebalancing is abandoned if unresolved."),
 			),
 			docs.FieldAdvanced("fetch_buffer_cap", "The maximum number of unprocessed messages to fetch at a given time."),
-			docs.FieldAdvanced("target_version", "The version of the Kafka protocol to use."),
 			func() docs.FieldSpec {
 				b := batch.FieldSpec()
-				b.Advanced = true
+				b.IsAdvanced = true
 				return b
 			}(),
 
@@ -462,6 +471,7 @@ func (k *kafkaReader) ConnectWithContext(ctx context.Context) error {
 
 	config := sarama.NewConfig()
 	config.ClientID = k.conf.ClientID
+	config.RackID = k.conf.RackID
 	config.Net.DialTimeout = time.Second
 	config.Version = k.version
 	config.Consumer.Return.Errors = true

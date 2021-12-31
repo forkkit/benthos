@@ -82,9 +82,12 @@ input:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
-    copy_response_headers: false
+    extract_headers:
+      include_prefixes: []
+      include_patterns: []
     rate_limit: ""
     timeout: 5s
     retry_period: 1s
@@ -116,7 +119,7 @@ If you enable streaming then Benthos will consume the body of the response as a 
 
 ### Pagination
 
-This input supports interpolation functions in the `url` and `headers` fields where data from the previous successfully consumed message (if there was one) can be referenced. This can be used in order to support basic levels of pagination. However, in cases where pagination depends on logic it is recommended that you use an [`http` processor](/docs/component/processors/http) instead, often combined with a [`generate` input](/docs/components/inputs/generate) in order to schedule the processor.
+This input supports interpolation functions in the `url` and `headers` fields where data from the previous successfully consumed message (if there was one) can be referenced. This can be used in order to support basic levels of pagination. However, in cases where pagination depends on logic it is recommended that you use an [`http` processor](/docs/components/processors/http) instead, often combined with a [`generate` input](/docs/components/inputs/generate) in order to schedule the processor.
 
 ## Examples
 
@@ -403,6 +406,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -423,6 +443,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -468,13 +489,49 @@ The path of a certificate key to use.
 Type: `string`  
 Default: `""`  
 
-### `copy_response_headers`
+### `extract_headers`
 
-Sets whether to copy the headers from the response to the resulting payload.
+Specify which response headers should be added to resulting messages as metadata.
 
 
-Type: `bool`  
-Default: `false`  
+Type: `object`  
+
+### `extract_headers.include_prefixes`
+
+Provide a list of explicit metadata key prefixes to be included when adding metadata to sent messages.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yaml
+# Examples
+
+include_prefixes:
+  - foo_
+  - bar_
+
+include_prefixes:
+  - kafka_
+```
+
+### `extract_headers.include_patterns`
+
+Provide a list of explicit metadata key regexp patterns to be included when adding metadata to sent messages.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yaml
+# Examples
+
+include_patterns:
+  - .*
+
+include_patterns:
+  - _timestamp_unix$
+```
 
 ### `rate_limit`
 
@@ -513,7 +570,7 @@ Default: `"300s"`
 The maximum number of retry attempts to make.
 
 
-Type: `number`  
+Type: `int`  
 Default: `3`  
 
 ### `backoff_on`
@@ -602,6 +659,7 @@ Requires version 3.42.0 or newer
 | `all-bytes` | Consume the entire file as a single binary message. |
 | `chunker:x` | Consume the file in chunks of a given number of bytes. |
 | `csv` | Consume structured rows as comma separated values, the first row must be a header row. |
+| `csv:x` | Consume structured rows as values separated by a custom delimiter, the first row must be a header row. The custom delimiter must be a single character, e.g. the codec `csv:|` would consume a pipe delimited file. |
 | `delim:x` | Consume the file in segments divided by a custom delimiter. |
 | `gzip` | Decompress a gzip file, this codec should precede another codec, e.g. `gzip/all-bytes`, `gzip/tar`, `gzip/csv`, etc. |
 | `lines` | Consume the file in segments divided by linebreaks. |
@@ -626,7 +684,7 @@ codec: csv
 Must be larger than the largest line of the stream.
 
 
-Type: `number`  
+Type: `int`  
 Default: `1000000`  
 
 

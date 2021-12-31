@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	llog "log"
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -56,13 +56,20 @@ type NSQ struct {
 }
 
 // NewNSQ creates a new NSQ output type.
+//
+// Deprecated: use the V2 API instead.
 func NewNSQ(conf NSQConfig, log log.Modular, stats metrics.Type) (*NSQ, error) {
+	return NewNSQV2(conf, types.NoopMgr(), log, stats)
+}
+
+// NewNSQV2 creates a new NSQ output type.
+func NewNSQV2(conf NSQConfig, mgr types.Manager, log log.Modular, stats metrics.Type) (*NSQ, error) {
 	n := NSQ{
 		log:  log,
 		conf: conf,
 	}
 	var err error
-	if n.topicStr, err = bloblang.NewField(conf.Topic); err != nil {
+	if n.topicStr, err = interop.NewBloblangField(mgr, conf.Topic); err != nil {
 		return nil, fmt.Errorf("failed to parse topic expression: %v", err)
 	}
 	if conf.TLS.Enabled {
@@ -97,7 +104,7 @@ func (n *NSQ) Connect() error {
 		return err
 	}
 
-	producer.SetLogger(llog.New(ioutil.Discard, "", llog.Flags()), nsq.LogLevelError)
+	producer.SetLogger(llog.New(io.Discard, "", llog.Flags()), nsq.LogLevelError)
 
 	if err := producer.Ping(); err != nil {
 		return err

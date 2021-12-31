@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/codec"
 	"github.com/Jeffail/benthos/v3/internal/docs"
-	sftpSetup "github.com/Jeffail/benthos/v3/internal/service/sftp"
+	sftpSetup "github.com/Jeffail/benthos/v3/internal/impl/sftp"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/output/writer"
@@ -25,7 +25,7 @@ import (
 func init() {
 	Constructors[TypeSFTP] = TypeSpec{
 		constructor: fromSimpleConstructor(func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-			sftp, err := newSFTPWriter(conf.SFTP, log, stats)
+			sftp, err := newSFTPWriter(conf.SFTP, mgr, log, stats)
 			if err != nil {
 				return nil, err
 			}
@@ -41,7 +41,9 @@ func init() {
 		Version: "3.39.0",
 		Summary: `Writes files to a server over SFTP.`,
 		Description: `
-In order to have a different path for each object you should use function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).`,
+In order to have a different path for each object you should use function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
+
+` + multipartCodecDoc,
 		Async: true,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon(
@@ -109,6 +111,7 @@ type sftpWriter struct {
 
 func newSFTPWriter(
 	conf SFTPConfig,
+	mgr types.Manager,
 	log log.Modular,
 	stats metrics.Type,
 ) (*sftpWriter, error) {
@@ -122,7 +125,7 @@ func newSFTPWriter(
 	if s.codec, s.codecConf, err = codec.GetWriter(conf.Codec); err != nil {
 		return nil, err
 	}
-	if s.path, err = bloblang.NewField(conf.Path); err != nil {
+	if s.path, err = interop.NewBloblangField(mgr, conf.Path); err != nil {
 		return nil, fmt.Errorf("failed to parse path expression: %w", err)
 	}
 

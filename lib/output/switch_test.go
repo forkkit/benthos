@@ -1,12 +1,14 @@
 package output
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/internal/batch"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -70,7 +72,7 @@ func TestSwitchNoConditions(t *testing.T) {
 			var ts types.Transaction
 			select {
 			case ts = <-mockOutputs[j].TChan:
-				if string(ts.Payload.Get(0).Get()) != string(content[0]) {
+				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
 					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
 				}
 				resChanSlice = append(resChanSlice, ts.ResponseChan)
@@ -136,7 +138,7 @@ func TestSwitchNoRetries(t *testing.T) {
 			var ts types.Transaction
 			select {
 			case ts = <-mockOutputs[j].TChan:
-				if string(ts.Payload.Get(0).Get()) != string(content[0]) {
+				if !bytes.Equal(ts.Payload.Get(0).Get(), content[0]) {
 					t.Errorf("Wrong content returned %s != %s", ts.Payload.Get(0).Get(), content[0])
 				}
 				resChanSlice = append(resChanSlice, ts.ResponseChan)
@@ -174,6 +176,166 @@ func TestSwitchNoRetries(t *testing.T) {
 	if err := s.WaitForClose(time.Second * 5); err != nil {
 		t.Error(err)
 	}
+}
+
+func TestSwitchBatchNoRetries(t *testing.T) {
+	conf := NewConfig()
+	conf.Switch.RetryUntilSuccess = false
+
+	okOut := NewConfig()
+	okOut.Type = TypeDrop
+	conf.Switch.Cases = append(conf.Switch.Cases, SwitchConfigCase{
+		Check:  `root = this.id % 2 == 0`,
+		Output: okOut,
+	})
+
+	errOut := NewConfig()
+	errOut.Type = TypeReject
+	errOut.Reject = "meow"
+	conf.Switch.Cases = append(conf.Switch.Cases, SwitchConfigCase{
+		Check:  `root = true`,
+		Output: errOut,
+	})
+
+	s, err := NewSwitch(conf, types.NoopMgr(), log.Noop(), metrics.Noop())
+	require.NoError(t, err)
+
+	readChan := make(chan types.Transaction)
+	resChan := make(chan types.Response)
+	require.NoError(t, s.Consume(readChan))
+
+	msg := message.New([][]byte{
+		[]byte(`{"content":"hello world","id":0}`),
+		[]byte(`{"content":"hello world","id":1}`),
+		[]byte(`{"content":"hello world","id":2}`),
+		[]byte(`{"content":"hello world","id":3}`),
+		[]byte(`{"content":"hello world","id":4}`),
+	})
+
+	select {
+	case readChan <- types.NewTransaction(msg, resChan):
+	case <-time.After(time.Second):
+		t.Fatal("Timed out waiting for broker send")
+	}
+
+	var res types.Response
+	select {
+	case res = <-resChan:
+	case <-time.After(time.Second):
+		t.Fatal("Timed out responding to broker")
+	}
+
+	err = res.Error()
+	require.Error(t, err)
+
+	bOut, ok := err.(*batch.Error)
+	require.True(t, ok, "should be batch error, got: %v", err)
+
+	assert.Equal(t, 2, bOut.IndexedErrors())
+
+	errContents := []string{}
+	bOut.WalkParts(func(i int, p types.Part, e error) bool {
+		if e != nil {
+			errContents = append(errContents, string(p.Get()))
+			assert.EqualError(t, e, "meow")
+		}
+		return true
+	})
+	assert.Equal(t, []string{
+		`{"content":"hello world","id":1}`,
+		`{"content":"hello world","id":3}`,
+	}, errContents)
+
+	s.CloseAsync()
+	require.NoError(t, s.WaitForClose(time.Second*5))
+}
+
+func TestSwitchBatchNoRetriesBatchErr(t *testing.T) {
+	conf := NewConfig()
+	conf.Switch.RetryUntilSuccess = false
+	mockOutputs := []*MockOutputType{}
+	nOutputs := 2
+
+	for i := 0; i < nOutputs; i++ {
+		conf.Switch.Cases = append(conf.Switch.Cases, NewSwitchConfigCase())
+		conf.Switch.Cases[i].Continue = true
+		mockOutputs = append(mockOutputs, &MockOutputType{})
+	}
+
+	s := newSwitch(t, conf, mockOutputs)
+
+	readChan := make(chan types.Transaction)
+	resChan := make(chan types.Response)
+	require.NoError(t, s.Consume(readChan))
+
+	msg := message.New([][]byte{
+		[]byte("hello world 0"),
+		[]byte("hello world 1"),
+		[]byte("hello world 2"),
+		[]byte("hello world 3"),
+		[]byte("hello world 4"),
+	})
+
+	select {
+	case readChan <- types.NewTransaction(msg, resChan):
+	case <-time.After(time.Second):
+		t.Fatal("Timed out waiting for broker send")
+	}
+
+	transactions := []types.Transaction{}
+	for j := 0; j < nOutputs; j++ {
+		select {
+		case ts := <-mockOutputs[j].TChan:
+			transactions = append(transactions, ts)
+		case <-time.After(time.Second):
+			t.Fatal("Timed out waiting for broker propagate")
+		}
+	}
+	for j := 0; j < nOutputs; j++ {
+		var res types.Response
+		if j == 0 {
+			batchErr := batch.NewError(transactions[j].Payload, errors.New("not this"))
+			batchErr.Failed(1, errors.New("err 1"))
+			batchErr.Failed(3, errors.New("err 3"))
+			res = response.NewError(batchErr)
+		} else {
+			res = response.NewAck()
+		}
+		select {
+		case transactions[j].ResponseChan <- res:
+		case <-time.After(time.Second):
+			t.Fatal("Timed out responding to broker")
+		}
+	}
+
+	select {
+	case res := <-resChan:
+		err := res.Error()
+		require.Error(t, err)
+
+		bOut, ok := err.(*batch.Error)
+		require.True(t, ok, "should be batch error but got %T", err)
+
+		assert.Equal(t, 2, bOut.IndexedErrors())
+
+		errContents := []string{}
+		bOut.WalkParts(func(i int, p types.Part, e error) bool {
+			if e != nil {
+				errContents = append(errContents, string(p.Get()))
+				assert.EqualError(t, e, fmt.Sprintf("err %v", i))
+			}
+			return true
+		})
+		assert.Equal(t, []string{
+			"hello world 1",
+			"hello world 3",
+		}, errContents)
+	case <-time.After(time.Second):
+		t.Fatal("Timed out responding to broker")
+	}
+
+	s.CloseAsync()
+	require.NoError(t, s.WaitForClose(time.Second*5))
 }
 
 func TestSwitchWithConditions(t *testing.T) {
@@ -254,7 +416,7 @@ func TestSwitchWithConditions(t *testing.T) {
 		} else if i%2 == 0 {
 			foo = "baz"
 		}
-		content := [][]byte{[]byte(fmt.Sprintf("{\"foo\":\"%s\"}", foo))}
+		content := [][]byte{[]byte(fmt.Sprintf("{\"foo\":%q}", foo))}
 		select {
 		case readChan <- types.NewTransaction(message.New(content), resChan):
 		case <-time.After(time.Second):
@@ -466,9 +628,9 @@ func TestSwitchBatchGroup(t *testing.T) {
 	}
 
 	select {
-	case ts = <-mockOutputs[0].TChan:
+	case <-mockOutputs[0].TChan:
 		t.Error("did not expect message route to 0")
-	case ts = <-mockOutputs[2].TChan:
+	case <-mockOutputs[2].TChan:
 		t.Error("did not expect message route to 2")
 	case res := <-resChan:
 		if res.Error() != nil {
@@ -652,7 +814,7 @@ func TestSwitchWithConditionsNoFallthrough(t *testing.T) {
 		if i%2 == 0 {
 			foo = "baz"
 		}
-		content := [][]byte{[]byte(fmt.Sprintf("{\"foo\":\"%s\"}", foo))}
+		content := [][]byte{[]byte(fmt.Sprintf("{\"foo\":%q}", foo))}
 		select {
 		case readChan <- types.NewTransaction(message.New(content), resChan):
 		case <-time.After(time.Second):
@@ -735,7 +897,7 @@ func TestSwitchAtLeastOnce(t *testing.T) {
 		return
 	}
 	select {
-	case ts1 = <-mockOne.TChan:
+	case <-mockOne.TChan:
 		t.Error("Received duplicate message to mockOne")
 	case ts2 = <-mockTwo.TChan:
 	case <-resChan:

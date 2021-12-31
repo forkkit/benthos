@@ -36,6 +36,7 @@ input:
     topics:
       - benthos_topic
     client_id: benthos_input
+    connect_timeout: 30s
 ```
 
 </TabItem>
@@ -51,14 +52,24 @@ input:
     topics:
       - benthos_topic
     client_id: benthos_input
+    dynamic_client_id_suffix: ""
     qos: 1
     clean_session: true
+    will:
+      enabled: false
+      qos: 0
+      retained: false
+      topic: ""
+      payload: ""
+    connect_timeout: 30s
     user: ""
     password: ""
+    keepalive: 30
     tls:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
 ```
@@ -107,6 +118,19 @@ An identifier for the client connection.
 Type: `string`  
 Default: `"benthos_input"`  
 
+### `dynamic_client_id_suffix`
+
+Append a dynamically generated suffix to the specified `client_id` on each run of the pipeline. This can be useful when clustering Benthos producers.
+
+
+Type: `string`  
+Default: `""`  
+
+| Option | Summary |
+|---|---|
+| `nanoid` | append a nanoid of length 21 characters |
+
+
 ### `qos`
 
 The level of delivery guarantee to enforce.
@@ -124,6 +148,71 @@ Set whether the connection is non-persistent.
 Type: `bool`  
 Default: `true`  
 
+### `will`
+
+Set last will message in case of Benthos failure
+
+
+Type: `object`  
+
+### `will.enabled`
+
+Whether to enable last will messages.
+
+
+Type: `bool`  
+Default: `false`  
+
+### `will.qos`
+
+Set QoS for last will message.
+
+
+Type: `int`  
+Default: `0`  
+Options: `0`, `1`, `2`.
+
+### `will.retained`
+
+Set retained for last will message.
+
+
+Type: `bool`  
+Default: `false`  
+
+### `will.topic`
+
+Set topic for last will message.
+
+
+Type: `string`  
+Default: `""`  
+
+### `will.payload`
+
+Set payload for last will message.
+
+
+Type: `string`  
+Default: `""`  
+
+### `connect_timeout`
+
+The maximum amount of time to wait in order to establish a connection before the attempt is abandoned.
+
+
+Type: `string`  
+Default: `"30s"`  
+Requires version 3.58.0 or newer  
+
+```yaml
+# Examples
+
+connect_timeout: 1s
+
+connect_timeout: 500ms
+```
+
 ### `user`
 
 A username to assume for the connection.
@@ -139,6 +228,14 @@ A password to provide for the connection.
 
 Type: `string`  
 Default: `""`  
+
+### `keepalive`
+
+Max seconds of inactivity before a keepalive message is sent.
+
+
+Type: `int`  
+Default: `30`  
 
 ### `tls`
 
@@ -173,6 +270,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -193,6 +307,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples

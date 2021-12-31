@@ -44,14 +44,14 @@ meta processor = $matches.0.1 | deleted()
 root = $matches.0.2 | deleted()`)
 		summary += " BETA FEATURE: Labels can also be created for the metric path by mapping meta fields."
 	}
-	return docs.FieldCommon("path_mapping", summary, examples...).Linter(docs.LintBloblangMapping)
+	return docs.FieldBloblang("path_mapping", summary, examples...)
 }
 
 func newPathMapping(mapping string, logger log.Modular) (*pathMapping, error) {
 	if mapping == "" {
 		return &pathMapping{m: nil, logger: logger}, nil
 	}
-	m, err := bloblang.NewMapping("", mapping)
+	m, err := bloblang.GlobalEnvironment().NewMapping(mapping)
 	if err != nil {
 		if perr, ok := err.(*parser.Error); ok {
 			return nil, fmt.Errorf("%v", perr.ErrorAtPosition([]rune(mapping)))

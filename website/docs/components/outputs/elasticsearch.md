@@ -56,9 +56,11 @@ output:
     urls:
       - http://localhost:9200
     index: benthos_index
+    action: index
     pipeline: ""
     id: ${!count("elastic_ids")}-${!timestamp_unix()}
     type: doc
+    routing: ""
     sniff: true
     healthcheck: true
     timeout: 5s
@@ -66,6 +68,7 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     max_in_flight: 1
@@ -95,6 +98,7 @@ output:
         token: ""
         role: ""
         role_external_id: ""
+    gzip_compression: false
 ```
 
 </TabItem>
@@ -146,6 +150,16 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 Type: `string`  
 Default: `"benthos_index"`  
 
+### `action`
+
+The action to take on the document.
+This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
+
+
+Type: `string`  
+Default: `"index"`  
+Options: `index`, `update`, `delete`.
+
 ### `pipeline`
 
 An optional pipeline id to preprocess incoming documents.
@@ -171,6 +185,15 @@ The document type.
 
 Type: `string`  
 Default: `"doc"`  
+
+### `routing`
+
+The routing key to use for the document.
+This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
+
+
+Type: `string`  
+Default: `""`  
 
 ### `sniff`
 
@@ -228,6 +251,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -248,6 +288,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -500,7 +541,7 @@ Default: `""`
 
 ### `aws.credentials`
 
-Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/aws).
+Optional manual configuration of AWS credentials to use. More information can be found [in this document](/docs/guides/cloud/aws).
 
 
 Type: `object`  
@@ -552,5 +593,13 @@ An external ID to provide when assuming a role.
 
 Type: `string`  
 Default: `""`  
+
+### `gzip_compression`
+
+Enable gzip compression on the request side.
+
+
+Type: `bool`  
+Default: `false`  
 
 

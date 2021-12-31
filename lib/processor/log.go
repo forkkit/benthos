@@ -6,11 +6,11 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/query"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -84,14 +84,14 @@ pipeline:
 `,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("level", "The log level to use.").HasOptions("FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE", "ALL"),
-			docs.FieldCommon("fields", "A map of fields to print along with the log message.").IsInterpolated().Map(),
+			docs.FieldString("fields", "A map of fields to print along with the log message.").IsInterpolated().Map(),
 			docs.FieldCommon(
 				"fields_mapping", "An optional [Bloblang mapping](/docs/guides/bloblang/about) that can be used to specify extra fields to add to the log. If log fields are also added with the `fields` field then those values will override matching keys from this mapping.",
 				`root.reason = "cus I wana"
 root.id = this.id
 root.age = this.user.age.number()
 root.kafka_topic = meta("kafka_topic")`,
-			).AtVersion("3.40.0"),
+			).AtVersion("3.40.0").IsBloblang(),
 			docs.FieldCommon("message", "The message to print.").IsInterpolated(),
 		},
 	}
@@ -140,7 +140,7 @@ type Log struct {
 func NewLog(
 	conf Config, mgr types.Manager, logger log.Modular, stats metrics.Type,
 ) (Type, error) {
-	message, err := bloblang.NewField(conf.Log.Message)
+	message, err := interop.NewBloblangField(mgr, conf.Log.Message)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse message expression: %v", err)
 	}
@@ -152,7 +152,7 @@ func NewLog(
 	}
 	if len(conf.Log.Fields) > 0 {
 		for k, v := range conf.Log.Fields {
-			if l.fields[k], err = bloblang.NewField(v); err != nil {
+			if l.fields[k], err = interop.NewBloblangField(mgr, v); err != nil {
 				return nil, fmt.Errorf("failed to parse field '%v' expression: %v", k, err)
 			}
 		}
@@ -162,7 +162,7 @@ func NewLog(
 		if l.loggerWith, ok = logger.(logWith); !ok {
 			return nil, errors.New("the provided logger does not support structured fields required for `fields_mapping`")
 		}
-		if l.fieldsMapping, err = bloblang.NewMapping("", conf.Log.FieldsMapping); err != nil {
+		if l.fieldsMapping, err = interop.NewBloblangMapping(mgr, conf.Log.FieldsMapping); err != nil {
 			return nil, fmt.Errorf("failed to parse fields mapping: %w", err)
 		}
 	}

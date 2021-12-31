@@ -8,6 +8,7 @@ import (
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/Jeffail/benthos/v3/lib/util/tls"
+	"github.com/Jeffail/gabs/v2"
 )
 
 //------------------------------------------------------------------------------
@@ -53,11 +54,16 @@ You can access these metadata fields using
 			CategoryServices,
 		},
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("url",
-				"A URL to connect to.",
-				"amqp://localhost:5672/",
-				"amqps://guest:guest@localhost:5672/",
-			),
+			docs.FieldString("urls",
+				"A list of URLs to connect to. The first URL to successfully establish a connection will be used until the connection is closed. If an item of the list contains commas it will be expanded into multiple URLs.",
+				[]string{"amqp://guest:guest@127.0.0.1:5672/"},
+				[]string{"amqp://127.0.0.1:5672/,amqp://127.0.0.2:5672/"},
+				[]string{"amqp://127.0.0.1:5672/", "amqp://127.0.0.2:5672/"},
+			).Array().AtVersion("3.58.0"),
+			docs.FieldDeprecated("url").OmitWhen(func(field, parent interface{}) (string, bool) {
+				return "field url is deprecated and should be omitted when urls is used",
+					len(gabs.Wrap(parent).S("urls").Children()) > 0
+			}),
 			docs.FieldCommon("queue", "An AMQP queue to consume from."),
 			docs.FieldAdvanced("queue_declare", `
 Allows you to passively declare the target queue. If the queue already exists
@@ -75,8 +81,8 @@ then the declaration passively verifies that they match the target fields.`,
 					},
 				},
 			).Array().WithChildren(
-				docs.FieldAdvanced("exchange", "The exchange of the declared binding.").HasDefault(""),
-				docs.FieldAdvanced("key", "The key of the declared binding.").HasDefault(""),
+				docs.FieldString("exchange", "The exchange of the declared binding.").HasDefault(""),
+				docs.FieldString("key", "The key of the declared binding.").HasDefault(""),
 			),
 			docs.FieldCommon("consumer_tag", "A consumer tag."),
 			docs.FieldAdvanced("auto_ack", "Acknowledge messages automatically as they are consumed rather than waiting for acknowledgments from downstream. This can improve throughput and prevent the pipeline from blocking but at the cost of eliminating delivery guarantees."),
@@ -85,7 +91,7 @@ then the declaration passively verifies that they match the target fields.`,
 			tls.FieldSpec(),
 			func() docs.FieldSpec {
 				b := batch.FieldSpec()
-				b.Deprecated = true
+				b.IsDeprecated = true
 				return b
 			}(),
 		},

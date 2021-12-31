@@ -35,6 +35,7 @@ output:
       - localhost:9092
     topic: benthos_stream
     client_id: benthos_kafka_output
+    target_version: 1.0.0
     key: ""
     partitioner: fnv1a_hash
     compression: none
@@ -63,6 +64,7 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     sasl:
@@ -74,8 +76,11 @@ output:
       token_key: ""
     topic: benthos_stream
     client_id: benthos_kafka_output
+    target_version: 1.0.0
+    rack_id: ""
     key: ""
     partitioner: fnv1a_hash
+    partition: ""
     compression: none
     static_headers: {}
     metadata:
@@ -85,7 +90,6 @@ output:
     ack_replicas: false
     max_msg_bytes: 1000000
     timeout: 5s
-    target_version: 1.0.0
     retry_as_batch: false
     batching:
       count: 0
@@ -107,7 +111,7 @@ The config field `ack_replicas` determines whether we wait for acknowledgement f
 
 Both the `key` and `topic` fields can be dynamically set using function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
 
-[Metadata](/docs/configuration/metadata) will be added to each message sent as headers, but can be restricted using the field [`metadata`](#metadata).
+[Metadata](/docs/configuration/metadata) will be added to each message sent as headers (version 0.11+), but can be restricted using the field [`metadata`](#metadata).
 
 ### Strict Ordering and Retries
 
@@ -115,7 +119,15 @@ When strict ordering is required for messages written to topic partitions it is 
 
 You must also ensure that failed batches are never rerouted back to the same output. This can be done by setting the field `max_retries` to `0` and `backoff.max_elapsed_time` to empty, which will apply back pressure indefinitely until the batch is sent successfully.
 
-However, this also means that manual intervention will eventually be required in cases where the batch cannot be sent due to configuration problems such as an incorrect `max_msg_bytes` estimate. A less strict but automated alternative would be to route failed batches to a dead letter queue using a [`try` broker](/docs/components/outputs/try), but this would allow subsequent batches to be delivered in the meantime whilst those failed batches are dealt with.
+However, this also means that manual intervention will eventually be required in cases where the batch cannot be sent due to configuration problems such as an incorrect `max_msg_bytes` estimate. A less strict but automated alternative would be to route failed batches to a dead letter queue using a [`fallback` broker](/docs/components/outputs/fallback), but this would allow subsequent batches to be delivered in the meantime whilst those failed batches are dealt with.
+
+### Troubleshooting
+
+If you're seeing issues writing to or reading from Kafka with this component then it's worth trying out the newer [`kafka_franz` output](/docs/components/outputs/kafka_franz).
+
+- I'm seeing logs that report `Failed to connect to kafka: kafka: client has run out of available brokers to talk to (Is your cluster reachable?)`, but the brokers are definitely reachable.
+
+Unfortunately this error message will appear for a wide range of connection problems even when the broker endpoint can be reached. Double check your authentication configuration and also ensure that you have [enabled TLS](#tlsenabled) if applicable.
 
 ## Performance
 
@@ -183,6 +195,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -203,6 +232,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -265,7 +295,7 @@ Default: `""`
 
 | Option | Summary |
 |---|---|
-| `PLAIN` | Plain text authentication. |
+| `PLAIN` | Plain text authentication. NOTE: When using plain text auth it is extremely likely that you'll also need to [enable TLS](#tlsenabled). |
 | `OAUTHBEARER` | OAuth Bearer based authentication. |
 | `SCRAM-SHA-256` | Authentication using the SCRAM-SHA-256 mechanism. |
 | `SCRAM-SHA-512` | Authentication using the SCRAM-SHA-512 mechanism. |
@@ -340,6 +370,22 @@ An identifier for the client connection.
 Type: `string`  
 Default: `"benthos_kafka_output"`  
 
+### `target_version`
+
+The version of the Kafka protocol to use. This limits the capabilities used by the client and should ideally match the version of your brokers.
+
+
+Type: `string`  
+Default: `"1.0.0"`  
+
+### `rack_id`
+
+A rack identifier for this client.
+
+
+Type: `string`  
+Default: `""`  
+
 ### `key`
 
 The key to publish messages with.
@@ -356,7 +402,16 @@ The partitioning algorithm to use.
 
 Type: `string`  
 Default: `"fnv1a_hash"`  
-Options: `fnv1a_hash`, `murmur2_hash`, `random`, `round_robin`.
+Options: `fnv1a_hash`, `murmur2_hash`, `random`, `round_robin`, `manual`.
+
+### `partition`
+
+The manually-specified partition to publish messages to, relevant only when the field `partitioner` is set to `manual`. Must be able to parse as a 32-bit integer.
+This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
+
+
+Type: `string`  
+Default: `""`  
 
 ### `compression`
 
@@ -365,7 +420,7 @@ The compression algorithm to use.
 
 Type: `string`  
 Default: `"none"`  
-Options: `none`, `snappy`, `lz4`, `gzip`.
+Options: `none`, `snappy`, `lz4`, `gzip`, `zstd`.
 
 ### `static_headers`
 
@@ -446,14 +501,6 @@ The maximum period of time to wait for message sends before abandoning the reque
 
 Type: `string`  
 Default: `"5s"`  
-
-### `target_version`
-
-The version of the Kafka protocol to use.
-
-
-Type: `string`  
-Default: `"1.0.0"`  
 
 ### `retry_as_batch`
 

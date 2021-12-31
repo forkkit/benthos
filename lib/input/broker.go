@@ -83,8 +83,8 @@ child nodes processors.`,
 			CategoryUtility,
 		},
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("copies", "Whatever is specified within `inputs` will be created this many times."),
-			docs.FieldCommon("inputs", "A list of inputs to create.").Array().HasType(docs.FieldInput),
+			docs.FieldAdvanced("copies", "Whatever is specified within `inputs` will be created this many times."),
+			docs.FieldCommon("inputs", "A list of inputs to create.").Array().HasType(docs.FieldTypeInput),
 			batch.FieldSpec(),
 		},
 	}

@@ -1,18 +1,20 @@
 name: Docker Edge
 
 on:
+  workflow_dispatch: {}
   schedule:
     - cron: '0 2 * * *' # run at 2 AM UTC
 
 jobs:
   build:
+    if: ${{ github.repository == 'jeffail/benthos' || github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     steps:
 
     - name: Install Go
       uses: actions/setup-go@v2
       with:
-        go-version: 1.16.x
+        go-version: 1.17.x
 
     - name: Check Out Repo
       uses: actions/checkout@v2

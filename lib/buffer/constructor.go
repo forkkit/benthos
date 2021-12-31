@@ -34,14 +34,18 @@ type ConstructorFunc func(Config, types.Manager, log.Modular, metrics.Type) (Typ
 
 // WalkConstructors iterates each component constructor.
 func WalkConstructors(fn func(ConstructorFunc, docs.ComponentSpec)) {
+	inferred := docs.ComponentFieldsFromConf(NewConfig())
 	for k, v := range Constructors {
 		conf := v.config
 		if len(v.FieldSpecs) > 0 {
-			conf = docs.FieldComponent().WithChildren(v.FieldSpecs...)
+			conf = docs.FieldComponent().WithChildren(v.FieldSpecs.DefaultAndTypeFrom(inferred[k])...)
+		} else {
+			conf.Children = conf.Children.DefaultAndTypeFrom(inferred[k])
 		}
 		spec := docs.ComponentSpec{
 			Type:        docs.TypeBuffer,
 			Name:        k,
+			Categories:  []string{"Utility"},
 			Summary:     v.Summary,
 			Description: v.Description,
 			Footnotes:   v.Footnotes,
@@ -67,10 +71,13 @@ const (
 //------------------------------------------------------------------------------
 
 // Config is the all encompassing configuration struct for all buffer types.
+// Deprecated: Do not add new components here. Instead, use the public plugin
+// APIs. Examples can be found in: ./internal/impl
 type Config struct {
 	Type   string       `json:"type" yaml:"type"`
 	Memory MemoryConfig `json:"memory" yaml:"memory"`
 	None   struct{}     `json:"none" yaml:"none"`
+	Plugin interface{}  `json:"plugin,omitempty" yaml:"plugin,omitempty"`
 }
 
 // NewConfig returns a configuration struct fully populated with default values.
@@ -79,6 +86,7 @@ func NewConfig() Config {
 		Type:   "none",
 		Memory: NewMemoryConfig(),
 		None:   struct{}{},
+		Plugin: nil,
 	}
 }
 
@@ -119,8 +127,19 @@ func (conf *Config) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("line %v: %v", value.Line, err)
 	}
 
-	if aliased.Type, _, err = docs.GetInferenceCandidateFromNode(docs.TypeBuffer, aliased.Type, value); err != nil {
+	var spec docs.ComponentSpec
+	if aliased.Type, spec, err = docs.GetInferenceCandidateFromYAML(nil, docs.TypeBuffer, aliased.Type, value); err != nil {
 		return fmt.Errorf("line %v: %w", value.Line, err)
+	}
+
+	if spec.Plugin {
+		pluginNode, err := docs.GetPluginConfigYAML(aliased.Type, value)
+		if err != nil {
+			return fmt.Errorf("line %v: %v", value.Line, err)
+		}
+		aliased.Plugin = &pluginNode
+	} else {
+		aliased.Plugin = nil
 	}
 
 	*conf = Config(aliased)

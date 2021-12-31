@@ -5,9 +5,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/input/reader"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/Jeffail/benthos/v3/lib/util/throttle"
@@ -80,9 +81,7 @@ func (r *Reader) loop() {
 	)
 
 	defer func() {
-		err := r.reader.WaitForClose(time.Second)
-		for ; err != nil; err = r.reader.WaitForClose(time.Second) {
-		}
+		_ = r.reader.WaitForClose(shutdown.MaximumShutdownWait())
 		mRunning.Decr(1)
 		atomic.StoreInt32(&r.connected, 0)
 

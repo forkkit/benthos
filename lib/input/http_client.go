@@ -20,28 +20,27 @@ import (
 	"github.com/Jeffail/benthos/v3/lib/util/http/client"
 )
 
-func httpClientSpecs() docs.FieldSpecs {
+func httpClientSpec() docs.FieldSpec {
 	codecDocs := codec.ReaderDocs.AtVersion("3.42.0")
 	codecDocs.Description = "The way in which the bytes of a continuous stream are converted into messages. It's possible to consume lines using a custom delimiter with the `delim:x` codec, where x is the character sequence custom delimiter. It's not necessary to add gzip in the codec when the response headers specify it as it will be decompressed automatically."
 	codecDocs.Examples = []interface{}{"lines", "delim:\t", "delim:foobar", "csv"}
 
 	streamSpecs := docs.FieldSpecs{
-		docs.FieldCommon("enabled", "Enables streaming mode.").HasType("bool"),
-		docs.FieldCommon("reconnect", "Sets whether to re-establish the connection once it is lost.").HasType("bool"),
+		docs.FieldBool("enabled", "Enables streaming mode."),
+		docs.FieldBool("reconnect", "Sets whether to re-establish the connection once it is lost."),
 		codecDocs,
-		docs.FieldAdvanced("max_buffer", "Must be larger than the largest line of the stream.").HasType("number"),
+		docs.FieldInt("max_buffer", "Must be larger than the largest line of the stream.").Advanced(),
 		docs.FieldDeprecated("multipart"),
 		docs.FieldDeprecated("delimiter"),
 	}
 
-	specs := append(client.FieldSpecs(),
+	return client.FieldSpec(
 		docs.FieldCommon("payload", "An optional payload to deliver for each request."),
 		docs.FieldAdvanced("drop_empty_bodies", "Whether empty payloads received from the target server should be dropped."),
 		docs.FieldCommon(
 			"stream", "Allows you to set streaming mode, where requests are kept open and messages are processed line-by-line.",
 		).WithChildren(streamSpecs...),
 	)
-	return specs
 }
 
 func init() {
@@ -59,8 +58,8 @@ If you enable streaming then Benthos will consume the body of the response as a 
 
 ### Pagination
 
-This input supports interpolation functions in the ` + "`url` and `headers`" + ` fields where data from the previous successfully consumed message (if there was one) can be referenced. This can be used in order to support basic levels of pagination. However, in cases where pagination depends on logic it is recommended that you use an ` + "[`http` processor](/docs/component/processors/http) instead, often combined with a [`generate` input](/docs/components/inputs/generate)" + ` in order to schedule the processor.`,
-		FieldSpecs: httpClientSpecs(),
+This input supports interpolation functions in the ` + "`url` and `headers`" + ` fields where data from the previous successfully consumed message (if there was one) can be referenced. This can be used in order to support basic levels of pagination. However, in cases where pagination depends on logic it is recommended that you use an ` + "[`http` processor](/docs/components/processors/http) instead, often combined with a [`generate` input](/docs/components/inputs/generate)" + ` in order to schedule the processor.`,
+		config: httpClientSpec(),
 		Categories: []Category{
 			CategoryNetwork,
 		},
@@ -223,7 +222,7 @@ func (h *HTTPClient) ConnectWithContext(ctx context.Context) (err error) {
 		return nil
 	}
 
-	res, err := h.client.SendToResponse(ctx, h.payload, h.prevResponse)
+	res, err := h.client.SendToResponse(context.Background(), h.payload, h.prevResponse)
 	if err != nil {
 		if strings.Contains(err.Error(), "(Client.Timeout exceeded while awaiting headers)") {
 			err = types.ErrTimeout
@@ -232,12 +231,10 @@ func (h *HTTPClient) ConnectWithContext(ctx context.Context) (err error) {
 	}
 
 	p := message.NewPart(nil)
-	if h.conf.CopyResponseHeaders {
-		meta := p.Metadata()
-		for k, values := range res.Header {
-			if len(values) > 0 {
-				meta.Set(strings.ToLower(k), values[0])
-			}
+	meta := p.Metadata()
+	for k, values := range res.Header {
+		if len(values) > 0 {
+			meta.Set(strings.ToLower(k), values[0])
 		}
 	}
 	h.prevResponse = message.New(nil)
@@ -298,6 +295,16 @@ func (h *HTTPClient) readStreamed(ctx context.Context) (types.Message, reader.As
 		_ = codecAckFn(ctx, nil)
 		return nil, nil, types.ErrTimeout
 	}
+
+	meta := h.prevResponse.Get(0).Metadata()
+	resParts := make([]types.Part, 0, msg.Len())
+	msg.Iter(func(i int, p types.Part) error {
+		part := message.NewPart(p.Get())
+		part.SetMetadata(meta)
+		resParts = append(resParts, part)
+		return nil
+	})
+	h.prevResponse.SetAll(resParts)
 
 	return msg, func(rctx context.Context, res types.Response) error {
 		return codecAckFn(rctx, res.Error())

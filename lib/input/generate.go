@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/parser"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/input/reader"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
@@ -24,11 +24,11 @@ import (
 func init() {
 	Constructors[TypeGenerate] = TypeSpec{
 		constructor: fromSimpleConstructor(func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-			b, err := newBloblang(conf.Generate)
+			b, err := newBloblang(mgr, conf.Generate)
 			if err != nil {
 				return nil, err
 			}
-			return NewAsyncReader(TypeGenerate, true, b, log, stats)
+			return NewAsyncReader(TypeGenerate, false, reader.NewAsyncPreserver(b), log, stats)
 		}),
 		Version: "3.40.0",
 		Status:  docs.StatusStable,
@@ -37,11 +37,11 @@ Generates messages at a given interval using a [Bloblang](/docs/guides/bloblang/
 mapping executed without a context. This allows you to generate messages for
 testing your pipeline configs.`,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"mapping", "A [bloblang](/docs/guides/bloblang/about) mapping to use for generating messages.",
 				`root = "hello world"`,
 				`root = {"test":"message","id":uuid_v4()}`,
-			).Linter(docs.LintBloblangMapping),
+			),
 			docs.FieldCommon(
 				"interval",
 				"The time interval at which messages should be generated, expressed either as a duration string or as a cron expression. If set to an empty string messages will be generated as fast as downstream services can process them. Cron expressions can specify a timezone by prefixing the expression with `TZ=<location name>`, where the location name corresponds to a file within the IANA Time Zone database.",
@@ -97,7 +97,7 @@ input:
 
 	Constructors[TypeBloblang] = TypeSpec{
 		constructor: fromSimpleConstructor(func(conf Config, mgr types.Manager, log log.Modular, stats metrics.Type) (Type, error) {
-			b, err := newBloblang(conf.Bloblang)
+			b, err := newBloblang(mgr, conf.Bloblang)
 			if err != nil {
 				return nil, err
 			}
@@ -114,11 +114,11 @@ testing your pipeline configs.`,
 This input has been ` + "[renamed to `generate`](/docs/components/inputs/generate)" + `.
 `,
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"mapping", "A [bloblang](/docs/guides/bloblang/about) mapping to use for generating messages.",
 				`root = "hello world"`,
 				`root = {"test":"message","id":uuid_v4()}`,
-			).Linter(docs.LintBloblangMapping),
+			),
 			docs.FieldCommon(
 				"interval",
 				"The time interval at which messages should be generated, expressed either as a duration string or as a cron expression. If set to an empty string messages will be generated as fast as downstream services can process them.",
@@ -156,7 +156,8 @@ func NewBloblangConfig() BloblangConfig {
 // input is read from. An interval period must be specified that determines how
 // often a message is generated.
 type Bloblang struct {
-	remaining   int32
+	remaining   int64
+	limited     bool
 	firstIsFree bool
 	exec        *mapping.Executor
 	timer       *time.Ticker
@@ -165,7 +166,7 @@ type Bloblang struct {
 }
 
 // newBloblang creates a new bloblang input reader type.
-func newBloblang(conf BloblangConfig) (*Bloblang, error) {
+func newBloblang(mgr types.Manager, conf BloblangConfig) (*Bloblang, error) {
 	var (
 		duration    time.Duration
 		timer       *time.Ticker
@@ -187,20 +188,18 @@ func newBloblang(conf BloblangConfig) (*Bloblang, error) {
 		}
 		timer = time.NewTicker(duration)
 	}
-	exec, err := bloblang.NewMapping("", conf.Mapping)
+	exec, err := interop.NewBloblangMapping(mgr, conf.Mapping)
 	if err != nil {
 		if perr, ok := err.(*parser.Error); ok {
 			return nil, fmt.Errorf("failed to parse mapping: %v", perr.ErrorAtPosition([]rune(conf.Mapping)))
 		}
 		return nil, fmt.Errorf("failed to parse mapping: %v", err)
 	}
-	remaining := int32(conf.Count)
-	if remaining <= 0 {
-		remaining = -1
-	}
+	remaining := int64(conf.Count)
 	return &Bloblang{
 		exec:        exec,
 		remaining:   remaining,
+		limited:     remaining > 0,
 		timer:       timer,
 		schedule:    schedule,
 		location:    location,
@@ -244,8 +243,8 @@ func (b *Bloblang) ConnectWithContext(ctx context.Context) error {
 
 // ReadWithContext a new bloblang generated message.
 func (b *Bloblang) ReadWithContext(ctx context.Context) (types.Message, reader.AsyncAckFn, error) {
-	if atomic.LoadInt32(&b.remaining) >= 0 {
-		if atomic.AddInt32(&b.remaining, -1) < 0 {
+	if b.limited {
+		if remaining := atomic.AddInt64(&b.remaining, -1); remaining < 0 {
 			return nil, nil, types.ErrTypeClosed
 		}
 	}

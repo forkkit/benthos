@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/Jeffail/benthos/v3/lib/message"
@@ -18,14 +19,14 @@ func TestFunctions(t *testing.T) {
 
 	mustFunc := func(name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitFunction(name, args...)
+		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
 
 	mustMethod := func(fn Function, name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitMethod(name, fn, args...)
+		fn, err := InitMethodHelper(name, fn, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -160,7 +161,7 @@ func TestFunctions(t *testing.T) {
 func TestFunctionTargets(t *testing.T) {
 	function := func(name string, args ...interface{}) Function {
 		t.Helper()
-		fn, err := InitFunction(name, args...)
+		fn, err := InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -211,6 +212,42 @@ func TestFunctionTargets(t *testing.T) {
 	}
 }
 
+func TestNanoidFunction(t *testing.T) {
+	e, err := InitFunctionHelper("nanoid")
+	require.Nil(t, err)
+
+	res, err := e.Exec(FunctionContext{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, res)
+}
+
+func TestNanoidFunctionLength(t *testing.T) {
+	e, err := InitFunctionHelper("nanoid", int64(54))
+	require.Nil(t, err)
+
+	res, err := e.Exec(FunctionContext{})
+	require.NoError(t, err)
+	assert.Len(t, res, 54)
+}
+
+func TestNanoidFunctionAlphabet(t *testing.T) {
+	e, err := InitFunctionHelper("nanoid", int64(1), "a")
+	require.Nil(t, err)
+
+	res, err := e.Exec(FunctionContext{})
+	require.NoError(t, err)
+	assert.Equal(t, "a", res)
+}
+
+func TestKsuidFunction(t *testing.T) {
+	e, err := InitFunctionHelper("ksuid")
+	require.Nil(t, err)
+
+	res, err := e.Exec(FunctionContext{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, res)
+}
+
 func TestEnvFunction(t *testing.T) {
 	key := "BENTHOS_TEST_BLOBLANG_FUNCTION"
 	os.Setenv(key, "foobar")
@@ -218,7 +255,7 @@ func TestEnvFunction(t *testing.T) {
 		os.Unsetenv(key)
 	})
 
-	e, err := InitFunction("env", key)
+	e, err := InitFunctionHelper("env", key)
 	require.Nil(t, err)
 
 	res, err := e.Exec(FunctionContext{})
@@ -227,7 +264,7 @@ func TestEnvFunction(t *testing.T) {
 }
 
 func TestRandomInt(t *testing.T) {
-	e, err := InitFunction("random_int")
+	e, err := InitFunctionHelper("random_int")
 	require.Nil(t, err)
 
 	tallies := map[int64]int64{}
@@ -245,4 +282,107 @@ func TestRandomInt(t *testing.T) {
 	for _, v := range tallies {
 		assert.LessOrEqual(t, v, int64(10))
 	}
+
+	// Create a new random_int function with a different seed
+	e, err = InitFunctionHelper("random_int", 10)
+	require.NoError(t, err)
+
+	secondTallies := map[int64]int64{}
+
+	for i := 0; i < 100; i++ {
+		res, err := e.Exec(FunctionContext{}.WithValue(i))
+		require.NoError(t, err)
+		require.IsType(t, int64(0), res)
+		secondTallies[res.(int64)]++
+	}
+
+	assert.NotEqual(t, tallies, secondTallies)
+	assert.GreaterOrEqual(t, len(secondTallies), 20)
+	for _, v := range secondTallies {
+		assert.LessOrEqual(t, v, int64(10))
+	}
+}
+
+func TestRandomIntDynamic(t *testing.T) {
+	idFn := NewFieldFunction("")
+
+	e, err := InitFunctionHelper("random_int", idFn)
+	require.NoError(t, err)
+
+	tallies := map[int64]int64{}
+
+	for i := 0; i < 100; i++ {
+		res, err := e.Exec(FunctionContext{}.WithValue(i))
+		require.NoError(t, err)
+		require.IsType(t, int64(0), res)
+		tallies[res.(int64)]++
+	}
+
+	// Can't prove it ain't random, but I can kick up a fuss if something
+	// stinks.
+	assert.GreaterOrEqual(t, len(tallies), 20)
+	for _, v := range tallies {
+		assert.LessOrEqual(t, v, int64(10))
+	}
+
+	// Create a new random_int function and feed the same values in
+	e, err = InitFunctionHelper("random_int", idFn)
+	require.NoError(t, err)
+
+	secondTallies := map[int64]int64{}
+
+	for i := 0; i < 100; i++ {
+		res, err := e.Exec(FunctionContext{}.WithValue(i))
+		require.NoError(t, err)
+		require.IsType(t, int64(0), res)
+		secondTallies[res.(int64)]++
+	}
+
+	assert.Equal(t, tallies, secondTallies)
+
+	// Create a new random_int function and feed the first value in the same,
+	// but following values are different.
+	e, err = InitFunctionHelper("random_int", idFn)
+	require.NoError(t, err)
+
+	thirdTallies := map[int64]int64{}
+
+	for i := 0; i < 100; i++ {
+		input := i
+		if input > 0 {
+			input += 10
+		}
+		res, err := e.Exec(FunctionContext{}.WithValue(input))
+		require.NoError(t, err)
+		require.IsType(t, int64(0), res)
+		thirdTallies[res.(int64)]++
+	}
+
+	assert.Equal(t, tallies, thirdTallies)
+}
+
+func TestRandomIntDynamicParallel(t *testing.T) {
+	tsFn, err := InitFunctionHelper("timestamp_unix_nano")
+	require.NoError(t, err)
+
+	e, err := InitFunctionHelper("random_int", tsFn)
+	require.NoError(t, err)
+
+	startChan := make(chan struct{})
+	wg := sync.WaitGroup{}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-startChan
+			for j := 0; j < 100; j++ {
+				res, err := e.Exec(FunctionContext{})
+				require.NoError(t, err)
+				require.IsType(t, int64(0), res)
+			}
+		}()
+	}
+
+	close(startChan)
+	wg.Wait()
 }

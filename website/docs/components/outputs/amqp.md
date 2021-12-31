@@ -31,7 +31,7 @@ This component is deprecated and will be removed in the next major version relea
 output:
   label: ""
   amqp:
-    url: amqp://guest:guest@localhost:5672/
+    urls: []
     exchange: benthos-exchange
     key: benthos-key
     type: ""
@@ -48,7 +48,7 @@ output:
 output:
   label: ""
   amqp:
-    url: amqp://guest:guest@localhost:5672/
+    urls: []
     exchange: benthos-exchange
     exchange_declare:
       enabled: false
@@ -60,6 +60,7 @@ output:
     content_encoding: ""
     metadata:
       exclude_prefixes: []
+    priority: ""
     max_in_flight: 1
     persistent: false
     mandatory: false
@@ -68,6 +69,7 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
 ```
@@ -76,24 +78,31 @@ output:
 </Tabs>
 
 DEPRECATED: This output is deprecated and scheduled for removal in Benthos V4.
-Please use [`amqp_0_9`](amqp_0_9) instead.
+Please use [`amqp_0_9`](/docs/components/outputs/amqp_0_9) instead.
 
 ## Fields
 
-### `url`
+### `urls`
 
-A URL to connect to.
+A list of URLs to connect to. The first URL to successfully establish a connection will be used until the connection is closed. If an item of the list contains commas it will be expanded into multiple URLs.
 
 
-Type: `string`  
-Default: `"amqp://guest:guest@localhost:5672/"`  
+Type: `array`  
+Default: `[]`  
+Requires version 3.58.0 or newer  
 
 ```yaml
 # Examples
 
-url: amqp://localhost:5672/
+urls:
+  - amqp://guest:guest@127.0.0.1:5672/
 
-url: amqps://guest:guest@localhost:5672/
+urls:
+  - amqp://127.0.0.1:5672/,amqp://127.0.0.2:5672/
+
+urls:
+  - amqp://127.0.0.1:5672/
+  - amqp://127.0.0.2:5672/
 ```
 
 ### `exchange`
@@ -187,6 +196,25 @@ Provide a list of explicit metadata key prefixes to be excluded when adding meta
 Type: `array`  
 Default: `[]`  
 
+### `priority`
+
+Set the priority of each message with a dynamic interpolated expression.
+This field supports [interpolation functions](/docs/configuration/interpolation#bloblang-queries).
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+priority: "0"
+
+priority: ${! meta("amqp_priority") }
+
+priority: ${! json("doc.priority") }
+```
+
 ### `max_in_flight`
 
 The maximum number of messages to have in flight at a given time. Increase this to improve throughput.
@@ -251,6 +279,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -271,6 +316,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples

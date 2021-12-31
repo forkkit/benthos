@@ -7,11 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
+	"github.com/Jeffail/benthos/v3/internal/batch"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/component/output"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	imessage "github.com/Jeffail/benthos/v3/internal/message"
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
 	"github.com/Jeffail/benthos/v3/lib/condition"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
@@ -89,24 +91,24 @@ behavior is false, which will drop the message.`,
 					},
 				},
 			).Array().WithChildren(
-				docs.FieldCommon(
+				docs.FieldBloblang(
 					"check",
 					"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message should be routed to the case output. If left empty the case always passes.",
 					`this.type == "foo"`,
 					`this.contents.urls.contains("https://benthos.dev/")`,
-				).HasDefault("").Linter(docs.LintBloblangMapping),
+				).HasDefault(""),
 				docs.FieldCommon(
 					"output", "An [output](/docs/components/outputs/about/) for messages that pass the check to be routed to.",
-				).HasDefault(map[string]interface{}{}).HasType(docs.FieldOutput),
+				).HasDefault(map[string]interface{}{}).HasType(docs.FieldTypeOutput),
 				docs.FieldAdvanced(
 					"continue",
 					"Indicates whether, if this case passes for a message, the next case should also be tested.",
-				).HasDefault(false),
+				).HasDefault(false).HasType(docs.FieldTypeBool),
 			),
 			docs.FieldDeprecated("outputs").Array().WithChildren(
-				docs.FieldDeprecated("condition").HasType(docs.FieldCondition),
+				docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition),
 				docs.FieldDeprecated("fallthrough"),
-				docs.FieldDeprecated("output").HasType(docs.FieldOutput),
+				docs.FieldDeprecated("output").HasType(docs.FieldTypeOutput),
 			).OmitWhen(func(v, _ interface{}) (string, bool) {
 				arr, ok := v.([]interface{})
 				return "field outputs is deprecated in favour of cases", ok && len(arr) == 0
@@ -237,8 +239,11 @@ func NewSwitchConfigCase() SwitchConfigCase {
 // Switch is a broker that implements types.Consumer and broadcasts each message
 // out to an array of outputs.
 type Switch struct {
-	logger log.Modular
-	stats  metrics.Type
+	logger     log.Modular
+	stats      metrics.Type
+	mMsgRcvd   metrics.StatCounter
+	mMsgSnt    metrics.StatCounter
+	mOutputErr metrics.StatCounter
 
 	maxInFlight  int
 	transactions <-chan types.Transaction
@@ -276,6 +281,9 @@ func NewSwitch(
 		closedChan:        make(chan struct{}),
 		ctx:               ctx,
 		close:             done,
+		mMsgRcvd:          stats.GetCounter("switch.messages.received"),
+		mMsgSnt:           stats.GetCounter("switch.messages.sent"),
+		mOutputErr:        stats.GetCounter("switch.output.error"),
 	}
 
 	lCases := len(conf.Switch.Cases)
@@ -319,7 +327,7 @@ func NewSwitch(
 			return nil, fmt.Errorf("failed to create case '%v' output type '%v': %v", i, cConf.Output.Type, err)
 		}
 		if len(cConf.Check) > 0 {
-			if o.checks[i], err = bloblang.NewMapping("", cConf.Check); err != nil {
+			if o.checks[i], err = interop.NewBloblangMapping(mgr, cConf.Check); err != nil {
 				return nil, fmt.Errorf("failed to parse case '%v' check mapping: %v", i, err)
 			}
 		}
@@ -377,14 +385,142 @@ func (o *Switch) Connected() bool {
 
 //------------------------------------------------------------------------------
 
+func (o *Switch) dispatchRetryOnErr(outputTargets [][]types.Part) error {
+	var owg errgroup.Group
+	for target, parts := range outputTargets {
+		if len(parts) == 0 {
+			continue
+		}
+		msgCopy, i := message.New(nil), target
+		msgCopy.SetAll(parts)
+		owg.Go(func() error {
+			throt := throttle.New(throttle.OptCloseChan(o.ctx.Done()))
+			resChan := make(chan types.Response)
+
+			// Try until success or shutdown.
+			for {
+				select {
+				case o.outputTSChans[i] <- types.NewTransaction(msgCopy, resChan):
+				case <-o.ctx.Done():
+					return types.ErrTypeClosed
+				}
+				select {
+				case res := <-resChan:
+					if res.Error() != nil {
+						o.logger.Errorf("Failed to dispatch switch message: %v\n", res.Error())
+						o.mOutputErr.Incr(1)
+						if !throt.Retry() {
+							return types.ErrTypeClosed
+						}
+					} else {
+						o.mMsgSnt.Incr(1)
+						return nil
+					}
+				case <-o.ctx.Done():
+					return types.ErrTypeClosed
+				}
+			}
+		})
+	}
+	return owg.Wait()
+}
+
+func (o *Switch) dispatchNoRetries(group *imessage.SortGroup, sourceMessage types.Message, outputTargets [][]types.Part) error {
+	var wg sync.WaitGroup
+
+	var setErr func(error)
+	var setErrForPart func(types.Part, error)
+	var getErr func() error
+	{
+		var generalErr error
+		var batchErr *batch.Error
+		var errLock sync.Mutex
+
+		setErr = func(err error) {
+			if err == nil {
+				return
+			}
+			errLock.Lock()
+			generalErr = err
+			errLock.Unlock()
+		}
+		setErrForPart = func(part types.Part, err error) {
+			if err == nil {
+				return
+			}
+			errLock.Lock()
+			defer errLock.Unlock()
+
+			index := group.GetIndex(part)
+			if index == -1 {
+				generalErr = err
+				return
+			}
+
+			if batchErr == nil {
+				batchErr = batch.NewError(sourceMessage, err)
+			}
+			batchErr.Failed(index, err)
+		}
+		getErr = func() error {
+			if batchErr != nil {
+				return batchErr
+			}
+			return generalErr
+		}
+	}
+
+	for target, parts := range outputTargets {
+		if len(parts) == 0 {
+			continue
+		}
+		wg.Add(1)
+		msgCopy, i := message.New(nil), target
+		msgCopy.SetAll(parts)
+
+		go func() {
+			defer wg.Done()
+
+			resChan := make(chan types.Response)
+			select {
+			case o.outputTSChans[i] <- types.NewTransaction(msgCopy, resChan):
+			case <-o.ctx.Done():
+				setErr(types.ErrTypeClosed)
+				return
+			}
+			select {
+			case res := <-resChan:
+				if res.Error() != nil {
+					o.mOutputErr.Incr(1)
+					if bErr, ok := res.Error().(*batch.Error); ok {
+						bErr.WalkParts(func(i int, p types.Part, e error) bool {
+							if e != nil {
+								setErrForPart(p, e)
+							}
+							return true
+						})
+					} else {
+						msgCopy.Iter(func(i int, p types.Part) error {
+							setErrForPart(p, res.Error())
+							return nil
+						})
+					}
+				} else {
+					o.mMsgSnt.Incr(1)
+				}
+			case <-o.ctx.Done():
+				setErr(types.ErrTypeClosed)
+			}
+		}()
+	}
+
+	wg.Wait()
+	return getErr()
+}
+
 // loop is an internal loop that brokers incoming messages to many outputs.
 func (o *Switch) loop() {
-	var (
-		wg         = sync.WaitGroup{}
-		mMsgRcvd   = o.stats.GetCounter("switch.messages.received")
-		mMsgSnt    = o.stats.GetCounter("switch.messages.sent")
-		mOutputErr = o.stats.GetCounter("switch.output.error")
-	)
+	var wg sync.WaitGroup
 
 	defer func() {
 		wg.Wait()
@@ -393,11 +529,7 @@ func (o *Switch) loop() {
 			close(o.outputTSChans[i])
 		}
 		for _, output := range o.outputs {
-			if err := output.WaitForClose(time.Second); err != nil {
-				for err != nil {
-					err = output.WaitForClose(time.Second)
-				}
-			}
+			_ = output.WaitForClose(shutdown.MaximumShutdownWait())
 		}
 		close(o.closedChan)
 	}()
@@ -416,16 +548,18 @@ func (o *Switch) loop() {
 			case <-o.ctx.Done():
 				return
 			}
-			mMsgRcvd.Incr(1)
+			o.mMsgRcvd.Incr(1)
+
+			group, trackedMsg := imessage.NewSortGroup(ts.Payload)
 
 			outputTargets := make([][]types.Part, len(o.checks))
-			if checksErr := ts.Payload.Iter(func(i int, p types.Part) error {
+			if checksErr := trackedMsg.Iter(func(i int, p types.Part) error {
 				routedAtLeastOnce := false
 				for j, exe := range o.checks {
 					test := true
 					if exe != nil {
 						var err error
-						if test, err = exe.QueryPart(i, ts.Payload); err != nil {
+						if test, err = exe.QueryPart(i, trackedMsg); err != nil {
 							test = false
 							o.logger.Errorf("Failed to test case %v: %v\n", j, err)
 						}
@@ -451,49 +585,15 @@ func (o *Switch) loop() {
 				continue
 			}
 
-			var owg errgroup.Group
-			for target, parts := range outputTargets {
-				if len(parts) == 0 {
-					continue
-				}
-				msgCopy, i := message.New(nil), target
-				msgCopy.SetAll(parts)
-				owg.Go(func() error {
-					throt := throttle.New(throttle.OptCloseChan(o.ctx.Done()))
-					resChan := make(chan types.Response)
-
-					// Try until success or shutdown.
-					for {
-						select {
-						case o.outputTSChans[i] <- types.NewTransaction(msgCopy, resChan):
-						case <-o.ctx.Done():
-							return types.ErrTypeClosed
-						}
-						select {
-						case res := <-resChan:
-							if res.Error() != nil {
-								if o.retryUntilSuccess {
-									o.logger.Errorf("Failed to dispatch switch message: %v\n", res.Error())
-									mOutputErr.Incr(1)
-									if !throt.Retry() {
-										return types.ErrTypeClosed
-									}
-								} else {
-									return res.Error()
-								}
-							} else {
-								mMsgSnt.Incr(1)
-								return nil
-							}
-						case <-o.ctx.Done():
-							return types.ErrTypeClosed
-						}
-					}
-				})
+			var resErr error
+			if o.retryUntilSuccess {
+				resErr = o.dispatchRetryOnErr(outputTargets)
+			} else {
+				resErr = o.dispatchNoRetries(group, trackedMsg, outputTargets)
 			}
 
 			var oResponse types.Response = response.NewAck()
-			if resErr := owg.Wait(); resErr != nil {
+			if resErr != nil {
 				oResponse = response.NewError(resErr)
 			}
 			select {

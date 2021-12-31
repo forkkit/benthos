@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Jeffail/benthos/v3/internal/impl/nats/auth"
 	btls "github.com/Jeffail/benthos/v3/lib/util/tls"
 
 	"github.com/Jeffail/benthos/v3/lib/log"
@@ -26,6 +27,7 @@ type NATSConfig struct {
 	QueueID       string      `json:"queue" yaml:"queue"`
 	PrefetchCount int         `json:"prefetch_count" yaml:"prefetch_count"`
 	TLS           btls.Config `json:"tls" yaml:"tls"`
+	Auth          auth.Config `json:"auth" yaml:"auth"`
 }
 
 // NewNATSConfig creates a new NATSConfig with default values.
@@ -36,6 +38,7 @@ func NewNATSConfig() NATSConfig {
 		QueueID:       "benthos_queue",
 		PrefetchCount: 32,
 		TLS:           btls.NewConfig(),
+		Auth:          auth.New(),
 	}
 }
 
@@ -104,6 +107,8 @@ func (n *NATS) ConnectWithContext(ctx context.Context) error {
 		opts = append(opts, nats.Secure(n.tlsConf))
 	}
 
+	opts = append(opts, auth.GetOptions(n.conf.Auth)...)
+
 	if natsConn, err = nats.Connect(n.urls, opts...); err != nil {
 		return err
 	}
@@ -142,16 +147,11 @@ func (n *NATS) disconnect() {
 	n.natsChan = nil
 }
 
-// Read attempts to read a new message from the NATS subject.
-func (n *NATS) Read() (types.Message, error) {
-	msg, _, err := n.ReadWithContext(context.Background())
-	return msg, err
-}
-
 // ReadWithContext attempts to read a new message from the NATS subject.
 func (n *NATS) ReadWithContext(ctx context.Context) (types.Message, AsyncAckFn, error) {
 	n.cMut.Lock()
 	natsChan := n.natsChan
+	natsConn := n.natsConn
 	n.cMut.Unlock()
 
 	var msg *nats.Msg
@@ -168,12 +168,42 @@ func (n *NATS) ReadWithContext(ctx context.Context) (types.Message, AsyncAckFn, 
 	}
 
 	bmsg := message.New([][]byte{msg.Data})
-	bmsg.Get(0).Metadata().Set("nats_subject", msg.Subject)
+	meta := bmsg.Get(0).Metadata()
+	meta.Set("nats_subject", msg.Subject)
+	// process message headers if server supports the feature
+	if natsConn.HeadersSupported() {
+		for key := range msg.Header {
+			value := msg.Header.Get(key)
+			meta.Set(key, value)
+		}
+	}
 
-	return bmsg, noopAsyncAckFn, nil
+	return bmsg, func(ctx context.Context, res types.Response) error {
+		var ackErr error
+		if res.Error() != nil {
+			ackErr = msg.Nak()
+		} else {
+			ackErr = msg.Ack()
+		}
+		if errors.Is(ackErr, nats.ErrMsgNoReply) {
+			ackErr = nil
+		}
+		return ackErr
+	}, nil
 }
 
-// Acknowledge is a noop since NATS messages do not support acknowledgments.
+// Read attempts to read a new message from the NATS subject.
+//
+// Deprecated: Use ReadWithContext instead.
+func (n *NATS) Read() (types.Message, error) {
+	m, _, err := n.ReadWithContext(context.Background())
+	return m, err
+}
+
+// Acknowledge confirms whether or not our unacknowledged messages have been
+// successfully propagated or not.
+//
+// Deprecated: Use ReadWithContext instead.
 func (n *NATS) Acknowledge(err error) error {
 	return nil
 }

@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
-	"github.com/opentracing/opentracing-go"
 )
 
 //------------------------------------------------------------------------------
@@ -142,11 +142,11 @@ type Metadata struct {
 func NewMetadata(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	value, err := bloblang.NewField(conf.Metadata.Value)
+	value, err := interop.NewBloblangField(mgr, conf.Metadata.Value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
 	}
-	key, err := bloblang.NewField(conf.Metadata.Key)
+	key, err := interop.NewBloblangField(mgr, conf.Metadata.Key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key expression: %v", err)
 	}
@@ -180,7 +180,7 @@ func (p *Metadata) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 	p.mCount.Incr(1)
 	newMsg := msg.Copy()
 
-	proc := func(index int, span opentracing.Span, part types.Part) error {
+	proc := func(index int, span *tracing.Span, part types.Part) error {
 		key := p.key.StringLegacy(index, msg)
 		value := p.value.StringLegacy(index, msg)
 
@@ -192,7 +192,7 @@ func (p *Metadata) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 		return nil
 	}
 
-	IteratePartsWithSpan(TypeMetadata, p.parts, newMsg, proc)
+	IteratePartsWithSpanV2(TypeMetadata, p.parts, newMsg, proc)
 
 	msgs := [1]types.Message{newMsg}
 

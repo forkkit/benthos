@@ -10,6 +10,7 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
+	"github.com/Jeffail/benthos/v3/lib/manager"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/stream"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -101,6 +102,7 @@ type Type struct {
 	stats      metrics.Type
 	logger     log.Modular
 	apiTimeout time.Duration
+	apiEnabled bool
 
 	pipelineProcCtors []StreamProcConstructorFunc
 
@@ -115,21 +117,33 @@ func New(opts ...func(*Type)) *Type {
 		stats:      metrics.Noop(),
 		apiTimeout: time.Second * 5,
 		logger:     log.Noop(),
+		apiEnabled: true,
 	}
 	for _, opt := range opts {
 		opt(t)
 	}
-	t.registerEndpoints()
+	if t.apiEnabled {
+		t.registerEndpoints()
+	}
 	return t
 }
 
 //------------------------------------------------------------------------------
+
+// OptAPIEnabled sets whether the stream manager registers API endpoints for
+// CRUD operations on streams. This is enabled by default.
+func OptAPIEnabled(b bool) func(*Type) {
+	return func(t *Type) {
+		t.apiEnabled = b
+	}
+}
 
 // OptSetStats sets the metrics aggregator to be used by the manager and all
 // child streams.
 func OptSetStats(stats metrics.Type) func(*Type) {
 	return func(t *Type) {
 		t.stats = stats
+		t.manager = manager.SwapMetrics(t.manager, t.stats)
 	}
 }
 
@@ -145,7 +159,7 @@ func OptSetLogger(log log.Modular) func(*Type) {
 // all child streams.
 func OptSetManager(mgr types.Manager) func(*Type) {
 	return func(t *Type) {
-		t.manager = mgr
+		t.manager = manager.SwapMetrics(mgr, t.stats)
 	}
 }
 
@@ -199,8 +213,15 @@ func (m *Type) Create(id string, conf stream.Config) error {
 	}
 
 	sMgr, sLog, sStats := interop.LabelStream(id, m.manager, m.logger, m.stats)
+	if u, ok := sStats.(interface {
+		Unwrap() metrics.Type
+	}); ok {
+		sStats = u.Unwrap()
+	}
+
 	strmFlatMetrics := metrics.NewLocal()
 	sStats = metrics.Combine(sStats, strmFlatMetrics)
+	sMgr = manager.SwapMetrics(sMgr, sStats)
 
 	var wrapper *StreamStatus
 	strm, err := stream.New(

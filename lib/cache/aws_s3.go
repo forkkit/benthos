@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
@@ -37,7 +37,7 @@ does not already exist, therefore this cache is not suitable for deduplication.
 By default Benthos will use a shared credentials file when connecting to AWS
 services. It's also possible to set them explicitly at the component level,
 allowing you to transfer data across accounts. You can find out more
-[in this document](/docs/guides/aws).`,
+[in this document](/docs/guides/cloud/aws).`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("bucket", "The S3 bucket to store items in."),
 			docs.FieldCommon("content_type", "The content type to set for each item."),
@@ -66,7 +66,7 @@ does not already exist, therefore this cache is not suitable for deduplication.
 By default Benthos will use a shared credentials file when connecting to AWS
 services. It's also possible to set them explicitly at the component level,
 allowing you to transfer data across accounts. You can find out more
-[in this document](/docs/guides/aws).`,
+[in this document](/docs/guides/cloud/aws).`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("bucket", "The S3 bucket to store items in."),
 			docs.FieldCommon("content_type", "The content type to set for each item."),
@@ -246,7 +246,7 @@ func (s *S3) Get(key string) ([]byte, error) {
 
 	var bytes []byte
 	if err == nil {
-		bytes, err = ioutil.ReadAll(obj.Body)
+		bytes, err = io.ReadAll(obj.Body)
 		obj.Body.Close()
 	}
 	return bytes, err

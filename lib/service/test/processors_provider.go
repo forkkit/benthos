@@ -2,19 +2,20 @@ package test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Jeffail/benthos/v3/internal/bloblang/parser"
-	"github.com/Jeffail/benthos/v3/internal/bloblang/query"
+	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/lib/config"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/manager"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/processor"
 	"github.com/Jeffail/benthos/v3/lib/types"
+	"github.com/Jeffail/gabs/v2"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -70,7 +71,15 @@ func OptProcessorsProviderSetLogger(logger log.Modular) func(*ProcessorsProvider
 // the JSON Pointer targets a single processor config it will be constructed and
 // returned as an array of one element.
 func (p *ProcessorsProvider) Provide(jsonPtr string, environment map[string]string) ([]types.Processor, error) {
-	confs, err := p.getConfs(jsonPtr, environment)
+	return p.ProvideMocked(jsonPtr, environment, nil)
+}
+
+// ProvideMocked attempts to extract an array of processors from a Benthos
+// config. Supports injected mocked components in the parsed config. If the JSON
+// Pointer targets a single processor config it will be constructed and returned
+// as an array of one element.
+func (p *ProcessorsProvider) ProvideMocked(jsonPtr string, environment map[string]string, mocks map[string]yaml.Node) ([]types.Processor, error) {
+	confs, err := p.getConfs(jsonPtr, environment, mocks)
 	if err != nil {
 		return nil, err
 	}
@@ -79,20 +88,18 @@ func (p *ProcessorsProvider) Provide(jsonPtr string, environment map[string]stri
 
 // ProvideBloblang attempts to parse a Bloblang mapping and returns a processor
 // slice that executes it.
-func (p *ProcessorsProvider) ProvideBloblang(path string) ([]types.Processor, error) {
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(filepath.Dir(p.targetPath), path)
+func (p *ProcessorsProvider) ProvideBloblang(pathStr string) ([]types.Processor, error) {
+	if !filepath.IsAbs(pathStr) {
+		pathStr = filepath.Join(filepath.Dir(p.targetPath), pathStr)
 	}
 
-	mappingBytes, err := ioutil.ReadFile(path)
+	mappingBytes, err := os.ReadFile(pathStr)
 	if err != nil {
 		return nil, err
 	}
 
-	exec, mapErr := parser.ParseMapping(path, string(mappingBytes), parser.Context{
-		Functions: query.AllFunctions,
-		Methods:   query.AllMethods,
-	})
+	pCtx := parser.GlobalContext().WithImporterRelativeToFile(pathStr)
+	exec, mapErr := parser.ParseMapping(pCtx, string(mappingBytes))
 	if mapErr != nil {
 		return nil, mapErr
 	}
@@ -119,8 +126,9 @@ func (p *ProcessorsProvider) initProcs(confs cachedConfig) ([]types.Processor, e
 	return procs, nil
 }
 
-func confTargetID(jsonPtr string, environment map[string]string) string {
-	return fmt.Sprintf("%v-%v", jsonPtr, environment)
+func confTargetID(jsonPtr string, environment map[string]string, mocks map[string]yaml.Node) string {
+	mocksBytes, _ := yaml.Marshal(mocks)
+	return fmt.Sprintf("%v-%v-%s", jsonPtr, environment, mocksBytes)
 }
 
 func setEnvironment(vars map[string]string) func() {
@@ -172,8 +180,8 @@ func resolveProcessorsPointer(targetFile, jsonPtr string) (filePath, procPath st
 	return
 }
 
-func (p *ProcessorsProvider) getConfs(jsonPtr string, environment map[string]string) (cachedConfig, error) {
-	cacheKey := confTargetID(jsonPtr, environment)
+func (p *ProcessorsProvider) getConfs(jsonPtr string, environment map[string]string, mocks map[string]yaml.Node) (cachedConfig, error) {
+	cacheKey := confTargetID(jsonPtr, environment, mocks)
 
 	confs, exists := p.cachedConfigs[cacheKey]
 	if exists {
@@ -197,6 +205,11 @@ func (p *ProcessorsProvider) getConfs(jsonPtr string, environment map[string]str
 
 	cleanupEnv := setEnvironment(environment)
 	defer cleanupEnv()
+
+	remainingMocks := map[string]yaml.Node{}
+	for k, v := range mocks {
+		remainingMocks[k] = v
+	}
 
 	configBytes, err := config.ReadWithJSONPointers(targetPath, true)
 	if err != nil {
@@ -224,29 +237,58 @@ func (p *ProcessorsProvider) getConfs(jsonPtr string, environment map[string]str
 
 	confs.mgr = mgrWrapper
 
-	var root interface{}
-	if err = yaml.Unmarshal(configBytes, &root); err != nil {
+	root := &yaml.Node{}
+	if err = yaml.Unmarshal(configBytes, root); err != nil {
 		return confs, fmt.Errorf("failed to parse config file '%v': %v", targetPath, err)
 	}
 
-	var procs interface{}
-	if procs, err = config.JSONPointer(procPath, root); err != nil {
+	// Replace mock components, starting with all absolute paths in JSON pointer
+	// form, then parsing remaining mock targets as label names.
+	confSpec := config.Spec()
+	for k, v := range remainingMocks {
+		if !strings.HasPrefix(k, "/") {
+			continue
+		}
+		mockPathSlice, err := gabs.JSONPointerToSlice(k)
+		if err != nil {
+			return confs, fmt.Errorf("failed to parse mock path '%v': %w", k, err)
+		}
+		if err = confSpec.SetYAMLPath(nil, root, &v, mockPathSlice...); err != nil {
+			return confs, fmt.Errorf("failed to set mock '%v': %w", k, err)
+		}
+		delete(remainingMocks, k)
+	}
+
+	if len(remainingMocks) > 0 {
+		labelsToPaths := map[string][]string{}
+		confSpec.YAMLLabelsToPaths(nil, root, labelsToPaths, nil)
+		for k, v := range remainingMocks {
+			mockPathSlice, exists := labelsToPaths[k]
+			if !exists {
+				return confs, fmt.Errorf("mock for label '%v' could not be applied as the label was not found in the test target file, it is not currently possible to mock resources imported separate to the test file", k)
+			}
+			if err = confSpec.SetYAMLPath(nil, root, &v, mockPathSlice...); err != nil {
+				return confs, fmt.Errorf("failed to set mock '%v': %w", k, err)
+			}
+			delete(remainingMocks, k)
+		}
+	}
+
+	pathSlice, err := gabs.JSONPointerToSlice(procPath)
+	if err != nil {
+		return confs, fmt.Errorf("failed to parse case processors path '%v': %w", procPath, err)
+	}
+	if root, err = docs.GetYAMLPath(root, pathSlice...); err != nil {
 		return confs, fmt.Errorf("failed to resolve case processors from '%v': %v", targetPath, err)
 	}
 
-	var rawBytes []byte
-	if rawBytes, err = yaml.Marshal(procs); err != nil {
-		return confs, fmt.Errorf("failed to resolve case processors from '%v': %v", targetPath, err)
-	}
-
-	switch procs.(type) {
-	case []interface{}:
-		if err = yaml.Unmarshal(rawBytes, &confs.procs); err != nil {
+	if root.Kind == yaml.SequenceNode {
+		if err = root.Decode(&confs.procs); err != nil {
 			return confs, fmt.Errorf("failed to resolve case processors from '%v': %v", targetPath, err)
 		}
-	default:
+	} else {
 		var procConf processor.Config
-		if err = yaml.Unmarshal(rawBytes, &procConf); err != nil {
+		if err = root.Decode(&procConf); err != nil {
 			return confs, fmt.Errorf("failed to resolve case processors from '%v': %v", targetPath, err)
 		}
 		confs.procs = append(confs.procs, procConf)

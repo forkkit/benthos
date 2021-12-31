@@ -1,7 +1,6 @@
 package bundle
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
@@ -13,6 +12,24 @@ import (
 // imported.
 var AllProcessors = &ProcessorSet{
 	specs: map[string]processorSpec{},
+}
+
+//------------------------------------------------------------------------------
+
+// ProcessorAdd adds a new processor to this environment by providing a
+// constructor and documentation.
+func (e *Environment) ProcessorAdd(constructor ProcessorConstructor, spec docs.ComponentSpec) error {
+	return e.processors.Add(constructor, spec)
+}
+
+// ProcessorInit attempts to initialise a processor from a config.
+func (e *Environment) ProcessorInit(conf processor.Config, mgr NewManagement) (types.Processor, error) {
+	return e.processors.Init(conf, mgr)
+}
+
+// ProcessorDocs returns a slice of processor specs, which document each method.
+func (e *Environment) ProcessorDocs() []docs.ComponentSpec {
+	return e.processors.Docs()
 }
 
 //------------------------------------------------------------------------------
@@ -36,9 +53,6 @@ type ProcessorSet struct {
 func (s *ProcessorSet) Add(constructor ProcessorConstructor, spec docs.ComponentSpec) error {
 	if s.specs == nil {
 		s.specs = map[string]processorSpec{}
-	}
-	if _, exists := s.specs[spec.Name]; exists {
-		return fmt.Errorf("conflicting processor name: %v", spec.Name)
 	}
 	s.specs[spec.Name] = processorSpec{
 		constructor: constructor,

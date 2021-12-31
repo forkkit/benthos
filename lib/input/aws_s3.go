@@ -63,7 +63,7 @@ When downloading large files it's often necessary to process it in streamed part
 
 ## Credentials
 
-By default Benthos will use a shared credentials file when connecting to AWS services. It's also possible to set them explicitly at the component level, allowing you to transfer data across accounts. You can find out more [in this document](/docs/guides/aws).
+By default Benthos will use a shared credentials file when connecting to AWS services. It's also possible to set them explicitly at the component level, allowing you to transfer data across accounts. You can find out more [in this document](/docs/guides/cloud/aws).
 
 ## Metadata
 
@@ -79,7 +79,8 @@ This input adds the following metadata fields to each message:
 - All user defined metadata
 ` + "```" + `
 
-You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata).`,
+You can access these metadata fields using [function interpolation](/docs/configuration/interpolation#metadata). Note that user defined metadata is case insensitive within AWS, and it is likely that the keys will be received in a capitalized form, if you wish to make them consistent you can map all metadata keys to lower or uppercase using a Bloblang mapping such as ` + "`meta = meta().map_each_key(key -> key.lowercase())`" + `.`,
+
 		FieldSpecs: append(
 			append(docs.FieldSpecs{
 				docs.FieldCommon("bucket", "The bucket to consume from. If the field `sqs.url` is specified this field is optional."),

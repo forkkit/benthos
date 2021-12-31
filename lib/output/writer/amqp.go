@@ -3,20 +3,27 @@ package writer
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/component/output"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	btls "github.com/Jeffail/benthos/v3/lib/util/tls"
-	"github.com/streadway/amqp"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+const defaultDeprecatedAMQP09URL = "amqp://guest:guest@localhost:5672/"
+
+var errAMQP09Connect = errors.New("AMQP 0.9 Connect")
 
 //------------------------------------------------------------------------------
 
@@ -32,6 +39,7 @@ type AMQPExchangeDeclareConfig struct {
 // AMQPConfig contains configuration fields for the AMQP output type.
 type AMQPConfig struct {
 	URL             string                    `json:"url" yaml:"url"`
+	URLs            []string                  `json:"urls" yaml:"urls"`
 	MaxInFlight     int                       `json:"max_in_flight" yaml:"max_in_flight"`
 	Exchange        string                    `json:"exchange" yaml:"exchange"`
 	ExchangeDeclare AMQPExchangeDeclareConfig `json:"exchange_declare" yaml:"exchange_declare"`
@@ -40,6 +48,7 @@ type AMQPConfig struct {
 	ContentType     string                    `json:"content_type" yaml:"content_type"`
 	ContentEncoding string                    `json:"content_encoding" yaml:"content_encoding"`
 	Metadata        output.Metadata           `json:"metadata" yaml:"metadata"`
+	Priority        string                    `json:"priority" yaml:"priority"`
 	Persistent      bool                      `json:"persistent" yaml:"persistent"`
 	Mandatory       bool                      `json:"mandatory" yaml:"mandatory"`
 	Immediate       bool                      `json:"immediate" yaml:"immediate"`
@@ -49,7 +58,8 @@ type AMQPConfig struct {
 // NewAMQPConfig creates a new AMQPConfig with default values.
 func NewAMQPConfig() AMQPConfig {
 	return AMQPConfig{
-		URL:         "amqp://guest:guest@localhost:5672/",
+		URL:         defaultDeprecatedAMQP09URL,
+		URLs:        []string{},
 		MaxInFlight: 1,
 		Exchange:    "benthos-exchange",
 		ExchangeDeclare: AMQPExchangeDeclareConfig{
@@ -62,6 +72,7 @@ func NewAMQPConfig() AMQPConfig {
 		ContentType:     "application/octet-stream",
 		ContentEncoding: "",
 		Metadata:        output.NewMetadata(),
+		Priority:        "",
 		Persistent:      false,
 		Mandatory:       false,
 		Immediate:       false,
@@ -77,12 +88,14 @@ type AMQP struct {
 	msgType         *field.Expression
 	contentType     *field.Expression
 	contentEncoding *field.Expression
+	priority        *field.Expression
 	metaFilter      *output.MetadataFilter
 
 	log   log.Modular
 	stats metrics.Type
 
 	conf    AMQPConfig
+	urls    []string
 	tlsConf *tls.Config
 
 	conn        *amqp.Connection
@@ -96,7 +109,14 @@ type AMQP struct {
 }
 
 // NewAMQP creates a new AMQP writer type.
+//
+// Deprecated: use the V2 API instead.
 func NewAMQP(conf AMQPConfig, log log.Modular, stats metrics.Type) (*AMQP, error) {
+	return NewAMQPV2(types.NoopMgr(), conf, log, stats)
+}
+
+// NewAMQPV2 creates a new AMQP writer type.
+func NewAMQPV2(mgr types.Manager, conf AMQPConfig, log log.Modular, stats metrics.Type) (*AMQP, error) {
 	a := AMQP{
 		log:          log,
 		stats:        stats,
@@ -107,21 +127,41 @@ func NewAMQP(conf AMQPConfig, log log.Modular, stats metrics.Type) (*AMQP, error
 	if a.metaFilter, err = conf.Metadata.Filter(); err != nil {
 		return nil, fmt.Errorf("failed to construct metadata filter: %w", err)
 	}
-	if a.key, err = bloblang.NewField(conf.BindingKey); err != nil {
+	if a.key, err = interop.NewBloblangField(mgr, conf.BindingKey); err != nil {
 		return nil, fmt.Errorf("failed to parse binding key expression: %v", err)
 	}
-	if a.msgType, err = bloblang.NewField(conf.Type); err != nil {
+	if a.msgType, err = interop.NewBloblangField(mgr, conf.Type); err != nil {
 		return nil, fmt.Errorf("failed to parse type property expression: %v", err)
 	}
-	if a.contentType, err = bloblang.NewField(conf.ContentType); err != nil {
+	if a.contentType, err = interop.NewBloblangField(mgr, conf.ContentType); err != nil {
 		return nil, fmt.Errorf("failed to parse content_type property expression: %v", err)
 	}
-	if a.contentEncoding, err = bloblang.NewField(conf.ContentEncoding); err != nil {
+	if a.contentEncoding, err = interop.NewBloblangField(mgr, conf.ContentEncoding); err != nil {
 		return nil, fmt.Errorf("failed to parse content_encoding property expression: %v", err)
+	}
+	if a.priority, err = interop.NewBloblangField(mgr, conf.Priority); err != nil {
+		return nil, fmt.Errorf("failed to parse priority property expression: %w", err)
 	}
 	if conf.Persistent {
 		a.deliveryMode = amqp.Persistent
 	}
+
+	if conf.URL != defaultDeprecatedAMQP09URL && len(conf.URLs) > 0 {
+		return nil, errors.New("cannot mix both the field `url` and `urls`")
+	}
+
+	if len(conf.URLs) == 0 {
+		a.urls = append(a.urls, conf.URL)
+	}
+
+	for _, u := range conf.URLs {
+		for _, splitURL := range strings.Split(u, ",") {
+			if trimmed := strings.TrimSpace(splitURL); len(trimmed) > 0 {
+				a.urls = append(a.urls, trimmed)
+			}
+		}
+	}
+
 	if conf.TLS.Enabled {
 		if a.tlsConf, err = conf.TLS.Get(); err != nil {
 			return nil, err
@@ -142,19 +182,9 @@ func (a *AMQP) Connect() error {
 	a.connLock.Lock()
 	defer a.connLock.Unlock()
 
-	var conn *amqp.Connection
-	var err error
-
-	if a.conf.TLS.Enabled {
-		conn, err = amqp.DialTLS(a.conf.URL, a.tlsConf)
-		if err != nil {
-			return fmt.Errorf("amqp failed to connect: %v", err)
-		}
-	} else {
-		conn, err = amqp.Dial(a.conf.URL)
-		if err != nil {
-			return fmt.Errorf("amqp failed to connect: %v", err)
-		}
+	conn, err := a.reDial(a.urls)
+	if err != nil {
+		return err
 	}
 
 	var amqpChan *amqp.Channel
@@ -239,6 +269,18 @@ func (a *AMQP) Write(msg types.Message) error {
 		contentType := a.contentType.String(i, msg)
 		contentEncoding := a.contentEncoding.String(i, msg)
 
+		var priority uint8
+		if priorityString := a.priority.String(i, msg); priorityString != "" {
+			priorityInt, err := strconv.Atoi(priorityString)
+			if err != nil {
+				return fmt.Errorf("failed to parse valid integer from priority expression: %w", err)
+			}
+			if priorityInt > 9 || priorityInt < 0 {
+				return fmt.Errorf("invalid priority parsed from expression, must be <= 9 and >= 0, got %v", priorityInt)
+			}
+			priority = uint8(priorityInt)
+		}
+
 		headers := amqp.Table{}
 		a.metaFilter.Iter(p.Metadata(), func(k, v string) error {
 			headers[strings.ReplaceAll(k, "_", "-")] = v
@@ -256,7 +298,7 @@ func (a *AMQP) Write(msg types.Message) error {
 				ContentEncoding: contentEncoding,
 				Body:            p.Get(),
 				DeliveryMode:    a.deliveryMode, // 1=non-persistent, 2=persistent
-				Priority:        0,              // 0-9
+				Priority:        priority,       // 0-9
 				Type:            msgType,
 				// a bunch of application/implementation-specific fields
 			},
@@ -297,3 +339,47 @@ func (a *AMQP) WaitForClose(timeout time.Duration) error {
 }
 
 //------------------------------------------------------------------------------
+
+// reDial connection to amqp with one or more fallback URLs
+func (a *AMQP) reDial(urls []string) (conn *amqp.Connection, err error) {
+	for _, u := range urls {
+		conn, err = a.dial(u)
+		if err != nil {
+			if errors.Is(err, errAMQP09Connect) {
+				continue
+			}
+			break
+		}
+		return conn, nil
+	}
+	return nil, err
+}
+
+// dial attempts to connect to amqp URL
+func (a *AMQP) dial(amqpURL string) (conn *amqp.Connection, err error) {
+	u, err := url.Parse(amqpURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid AMQP URL: %w", err)
+	}
+
+	if a.conf.TLS.Enabled {
+		if u.User != nil {
+			conn, err = amqp.DialTLS(amqpURL, a.tlsConf)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %s", errAMQP09Connect, err)
+			}
+		} else {
+			conn, err = amqp.DialTLS_ExternalAuth(amqpURL, a.tlsConf)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %s", errAMQP09Connect, err)
+			}
+		}
+	} else {
+		conn, err = amqp.Dial(amqpURL)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", errAMQP09Connect, err)
+		}
+	}
+
+	return conn, nil
+}

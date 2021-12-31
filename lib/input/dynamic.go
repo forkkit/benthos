@@ -47,7 +47,7 @@ already exists it will be changed.`,
 			CategoryUtility,
 		},
 		FieldSpecs: docs.FieldSpecs{
-			docs.FieldCommon("inputs", "A map of inputs to statically create.").Map().HasType(docs.FieldInput),
+			docs.FieldCommon("inputs", "A map of inputs to statically create.").Map().HasType(docs.FieldTypeInput),
 			docs.FieldCommon("prefix", "A path prefix for HTTP endpoints that are registered."),
 			docs.FieldCommon("timeout", "The server side timeout of HTTP requests."),
 		},
@@ -138,12 +138,12 @@ func NewDynamic(
 		}
 		iMgr, iLog, iStats := interop.LabelChild(fmt.Sprintf("dynamic.inputs.%v", id), mgr, log, stats)
 		iStats = metrics.Combine(stats, iStats)
-		newInput, err := New(Config(newConf), iMgr, iLog, iStats, pipelines...)
+		newInput, err := New(newConf, iMgr, iLog, iStats, pipelines...)
 		if err != nil {
 			return err
 		}
 		inputConfigsMut.Lock()
-		inputConfigs[id] = Config(newConf)
+		inputConfigs[id] = newConf
 		inputConfigsMut.Unlock()
 		if err = fanIn.SetInput(id, newInput, timeout); err != nil {
 			log.Errorf("Failed to set input '%v': %v", id, err)

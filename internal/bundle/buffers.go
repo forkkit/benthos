@@ -1,7 +1,6 @@
 package bundle
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
@@ -12,6 +11,24 @@ import (
 // AllBuffers is a set containing every single buffer that has been imported.
 var AllBuffers = &BufferSet{
 	specs: map[string]bufferSpec{},
+}
+
+//------------------------------------------------------------------------------
+
+// BufferAdd adds a new buffer to this environment by providing a constructor
+// and documentation.
+func (e *Environment) BufferAdd(constructor BufferConstructor, spec docs.ComponentSpec) error {
+	return e.buffers.Add(constructor, spec)
+}
+
+// BufferInit attempts to initialise a buffer from a config.
+func (e *Environment) BufferInit(conf buffer.Config, mgr NewManagement) (buffer.Type, error) {
+	return e.buffers.Init(conf, mgr)
+}
+
+// BufferDocs returns a slice of buffer specs, which document each method.
+func (e *Environment) BufferDocs() []docs.ComponentSpec {
+	return e.buffers.Docs()
 }
 
 //------------------------------------------------------------------------------
@@ -34,9 +51,6 @@ type BufferSet struct {
 func (s *BufferSet) Add(constructor BufferConstructor, spec docs.ComponentSpec) error {
 	if s.specs == nil {
 		s.specs = map[string]bufferSpec{}
-	}
-	if _, exists := s.specs[spec.Name]; exists {
-		return fmt.Errorf("conflicting buffer name: %v", spec.Name)
 	}
 	s.specs[spec.Name] = bufferSpec{
 		constructor: constructor,

@@ -15,8 +15,9 @@ categories: ["Services"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Inserts items into a MongoDB collection.
 
 Introduced in version 3.43.0.
@@ -34,7 +35,7 @@ Introduced in version 3.43.0.
 output:
   label: ""
   mongodb:
-    url: mongodb://localhost:27017
+    url: ""
     database: ""
     collection: ""
     username: ""
@@ -47,6 +48,7 @@ output:
     document_map: ""
     filter_map: ""
     hint_map: ""
+    upsert: false
     max_in_flight: 1
     batching:
       count: 0
@@ -63,7 +65,7 @@ output:
 output:
   label: ""
   mongodb:
-    url: mongodb://localhost:27017
+    url: ""
     database: ""
     collection: ""
     username: ""
@@ -76,6 +78,7 @@ output:
     document_map: ""
     filter_map: ""
     hint_map: ""
+    upsert: false
     max_in_flight: 1
     batching:
       count: 0
@@ -112,7 +115,7 @@ The URL of the target MongoDB DB.
 
 
 Type: `string`  
-Default: `"mongodb://localhost:27017"`  
+Default: `""`  
 
 ```yaml
 # Examples
@@ -154,11 +157,12 @@ Default: `""`
 
 ### `operation`
 
-The mongo operation to perform. Must be one of the following: insert-one, delete-one, delete-many, replace-one, update-one.
+The mongodb operation to perform.
 
 
 Type: `string`  
 Default: `"update-one"`  
+Options: `insert-one`, `delete-one`, `delete-many`, `replace-one`, `update-one`.
 
 ### `write_concern`
 
@@ -238,6 +242,15 @@ hint_map: |-
   root.a = this.foo
   root.b = this.bar
 ```
+
+### `upsert`
+
+The upsert setting is optional and only applies for update-one and replace-one operations. If the filter specified in filter_map matches,the document is updated or replaced accordingly, otherwise it is created.
+
+
+Type: `bool`  
+Default: `false`  
+Requires version 3.60.0 or newer  
 
 ### `max_in_flight`
 

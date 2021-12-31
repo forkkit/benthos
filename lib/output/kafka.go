@@ -27,7 +27,7 @@ The config field ` + "`ack_replicas`" + ` determines whether we wait for acknowl
 
 Both the ` + "`key` and `topic`" + ` fields can be dynamically set using function interpolations described [here](/docs/configuration/interpolation#bloblang-queries).
 
-[Metadata](/docs/configuration/metadata) will be added to each message sent as headers, but can be restricted using the field ` + "[`metadata`](#metadata)" + `.
+[Metadata](/docs/configuration/metadata) will be added to each message sent as headers (version 0.11+), but can be restricted using the field ` + "[`metadata`](#metadata)" + `.
 
 ### Strict Ordering and Retries
 
@@ -35,7 +35,15 @@ When strict ordering is required for messages written to topic partitions it is 
 
 You must also ensure that failed batches are never rerouted back to the same output. This can be done by setting the field ` + "`max_retries` to `0` and `backoff.max_elapsed_time`" + ` to empty, which will apply back pressure indefinitely until the batch is sent successfully.
 
-However, this also means that manual intervention will eventually be required in cases where the batch cannot be sent due to configuration problems such as an incorrect ` + "`max_msg_bytes`" + ` estimate. A less strict but automated alternative would be to route failed batches to a dead letter queue using a ` + "[`try` broker](/docs/components/outputs/try)" + `, but this would allow subsequent batches to be delivered in the meantime whilst those failed batches are dealt with.`,
+However, this also means that manual intervention will eventually be required in cases where the batch cannot be sent due to configuration problems such as an incorrect ` + "`max_msg_bytes`" + ` estimate. A less strict but automated alternative would be to route failed batches to a dead letter queue using a ` + "[`fallback` broker](/docs/components/outputs/fallback)" + `, but this would allow subsequent batches to be delivered in the meantime whilst those failed batches are dealt with.
+
+### Troubleshooting
+
+If you're seeing issues writing to or reading from Kafka with this component then it's worth trying out the newer ` + "[`kafka_franz` output](/docs/components/outputs/kafka_franz)" + `.
+
+- I'm seeing logs that report ` + "`Failed to connect to kafka: kafka: client has run out of available brokers to talk to (Is your cluster reachable?)`" + `, but the brokers are definitely reachable.
+
+Unfortunately this error message will appear for a wide range of connection problems even when the broker endpoint can be reached. Double check your authentication configuration and also ensure that you have [enabled TLS](#tlsenabled) if applicable.`,
 		Async:   true,
 		Batches: true,
 		FieldSpecs: append(docs.FieldSpecs{
@@ -45,17 +53,19 @@ However, this also means that manual intervention will eventually be required in
 			sasl.FieldSpec(),
 			docs.FieldCommon("topic", "The topic to publish messages to.").IsInterpolated(),
 			docs.FieldCommon("client_id", "An identifier for the client connection."),
+			docs.FieldString("target_version", "The version of the Kafka protocol to use. This limits the capabilities used by the client and should ideally match the version of your brokers."),
+			docs.FieldAdvanced("rack_id", "A rack identifier for this client."),
 			docs.FieldCommon("key", "The key to publish messages with.").IsInterpolated(),
-			docs.FieldCommon("partitioner", "The partitioning algorithm to use.").HasOptions("fnv1a_hash", "murmur2_hash", "random", "round_robin"),
-			docs.FieldCommon("compression", "The compression algorithm to use.").HasOptions("none", "snappy", "lz4", "gzip"),
-			docs.FieldCommon("static_headers", "An optional map of static headers that should be added to messages in addition to metadata.", map[string]string{"first-static-header": "value-1", "second-static-header": "value-2"}).Map(),
+			docs.FieldCommon("partitioner", "The partitioning algorithm to use.").HasOptions("fnv1a_hash", "murmur2_hash", "random", "round_robin", "manual"),
+			docs.FieldAdvanced("partition", "The manually-specified partition to publish messages to, relevant only when the field `partitioner` is set to `manual`. Must be able to parse as a 32-bit integer.").IsInterpolated(),
+			docs.FieldCommon("compression", "The compression algorithm to use.").HasOptions("none", "snappy", "lz4", "gzip", "zstd"),
+			docs.FieldString("static_headers", "An optional map of static headers that should be added to messages in addition to metadata.", map[string]string{"first-static-header": "value-1", "second-static-header": "value-2"}).Map(),
 			docs.FieldCommon("metadata", "Specify criteria for which metadata values are sent with messages as headers.").WithChildren(output.MetadataFields()...),
 			output.InjectTracingSpanMappingDocs,
 			docs.FieldCommon("max_in_flight", "The maximum number of parallel message batches to have in flight at any given time."),
 			docs.FieldAdvanced("ack_replicas", "Ensure that messages have been copied across all replicas before acknowledging receipt."),
 			docs.FieldAdvanced("max_msg_bytes", "The maximum size in bytes of messages sent to the target topic."),
 			docs.FieldAdvanced("timeout", "The maximum period of time to wait for message sends before abandoning the request and retrying."),
-			docs.FieldAdvanced("target_version", "The version of the Kafka protocol to use."),
 			docs.FieldAdvanced("retry_as_batch", "When enabled forces an entire batch of messages to be retried if any individual message fails on a send, otherwise only the individual messages that failed are retried. Disabling this helps to reduce message duplicates during intermittent errors, but also makes it impossible to guarantee strict ordering of messages."),
 			batch.FieldSpec(),
 		}, retries.FieldSpecs()...),

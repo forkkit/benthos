@@ -10,13 +10,13 @@ Benthos is a declarative data streaming service that solves a wide range of data
 
 import ReactPlayer from 'react-player/youtube';
 
-<div class='container margin-vert--lg'>
-  <div class='row'>
+<div className='container margin-vert--lg'>
+  <div className='row row--no-gutters'>
     <ReactPlayer
-        class='col col--6 col--offset-3'
+        className='col'
         height='300px'
         url='https://www.youtube.com/embed/88DSzCFV4Ng'
-        controls='true'
+        controls={true}
     />
   </div>
 </div>

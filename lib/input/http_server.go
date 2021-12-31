@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -14,25 +13,24 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	imetadata "github.com/Jeffail/benthos/v3/internal/metadata"
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/message/metadata"
 	"github.com/Jeffail/benthos/v3/lib/message/roundtrip"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	httputil "github.com/Jeffail/benthos/v3/lib/util/http"
 	"github.com/Jeffail/benthos/v3/lib/util/throttle"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	"github.com/opentracing/opentracing-go"
 )
 
 //------------------------------------------------------------------------------
@@ -96,6 +94,7 @@ This input adds the following metadata fields to each message:
 ` + "``` text" + `
 - http_server_user_agent
 - http_server_request_path
+- http_server_verb
 - All headers (only first values are taken)
 - All query parameters
 - All path parameters
@@ -121,7 +120,10 @@ You can access these metadata fields using
 					"Specify the status code to return with synchronous responses. This is a string value, which allows you to customize it based on resulting payloads and their metadata.",
 					"200", `${! json("status") }`, `${! meta("status") }`,
 				).IsInterpolated(),
-				docs.FieldCommon("headers", "Specify headers to return with synchronous responses.").IsInterpolated().Map(),
+				docs.FieldString("headers", "Specify headers to return with synchronous responses.").IsInterpolated().Map().HasDefault(map[string]string{
+					"Content-Type": "application/octet-stream",
+				}),
+				docs.FieldCommon("metadata_headers", "Specify criteria for which metadata values are added to the response as headers.").WithChildren(imetadata.IncludeFilterDocs()...),
 			),
 		},
 		Categories: []Category{
@@ -135,8 +137,9 @@ You can access these metadata fields using
 // HTTPServerResponseConfig provides config fields for customising the response
 // given from successful requests.
 type HTTPServerResponseConfig struct {
-	Status  string            `json:"status" yaml:"status"`
-	Headers map[string]string `json:"headers" yaml:"headers"`
+	Status          string                        `json:"status" yaml:"status"`
+	Headers         map[string]string             `json:"headers" yaml:"headers"`
+	ExtractMetadata imetadata.IncludeFilterConfig `json:"metadata_headers" yaml:"metadata_headers"`
 }
 
 // NewHTTPServerResponseConfig creates a new HTTPServerConfig with default values.
@@ -146,6 +149,7 @@ func NewHTTPServerResponseConfig() HTTPServerResponseConfig {
 		Headers: map[string]string{
 			"Content-Type": "application/octet-stream",
 		},
+		ExtractMetadata: imetadata.NewIncludeFilterConfig(),
 	}
 }
 
@@ -191,8 +195,6 @@ func NewHTTPServerConfig() HTTPServerConfig {
 // custom address to bind a new server to which the endpoints will be registered
 // on instead.
 type HTTPServer struct {
-	running int32
-
 	conf  HTTPServerConfig
 	stats metrics.Type
 	log   log.Modular
@@ -204,12 +206,12 @@ type HTTPServer struct {
 
 	responseStatus  *field.Expression
 	responseHeaders map[string]*field.Expression
+	metaFilter      *imetadata.Filter
 
 	handlerWG    sync.WaitGroup
 	transactions chan types.Transaction
 
-	closeChan  chan struct{}
-	closedChan chan struct{}
+	shutSig *shutdown.Signaller
 
 	allowedVerbs map[string]struct{}
 
@@ -257,7 +259,7 @@ func NewHTTPServer(conf Config, mgr types.Manager, log log.Modular, stats metric
 	}
 
 	h := HTTPServer{
-		running:         1,
+		shutSig:         shutdown.NewSignaller(),
 		conf:            conf.HTTPServer,
 		stats:           stats,
 		log:             log,
@@ -267,8 +269,6 @@ func NewHTTPServer(conf Config, mgr types.Manager, log log.Modular, stats metric
 		timeout:         timeout,
 		responseHeaders: map[string]*field.Expression{},
 		transactions:    make(chan types.Transaction),
-		closeChan:       make(chan struct{}),
-		closedChan:      make(chan struct{}),
 
 		allowedVerbs: verbs,
 
@@ -289,13 +289,17 @@ func NewHTTPServer(conf Config, mgr types.Manager, log log.Modular, stats metric
 	}
 
 	var err error
-	if h.responseStatus, err = bloblang.NewField(h.conf.Response.Status); err != nil {
+	if h.responseStatus, err = interop.NewBloblangField(mgr, h.conf.Response.Status); err != nil {
 		return nil, fmt.Errorf("failed to parse response status expression: %v", err)
 	}
 	for k, v := range h.conf.Response.Headers {
-		if h.responseHeaders[k], err = bloblang.NewField(v); err != nil {
+		if h.responseHeaders[strings.ToLower(k)], err = interop.NewBloblangField(mgr, v); err != nil {
 			return nil, fmt.Errorf("failed to parse response header '%v' expression: %v", k, err)
 		}
+	}
+
+	if h.metaFilter, err = h.conf.Response.ExtractMetadata.CreateFilter(); err != nil {
+		return nil, fmt.Errorf("failed to construct metadata filter: %w", err)
 	}
 
 	postHdlr := httputil.GzipHandler(h.postHandler)
@@ -356,14 +360,14 @@ func (h *HTTPServer) extractMessageFromRequest(r *http.Request) (types.Message, 
 				return nil, err
 			}
 			var msgBytes []byte
-			if msgBytes, err = ioutil.ReadAll(p); err != nil {
+			if msgBytes, err = io.ReadAll(p); err != nil {
 				return nil, err
 			}
 			msg.Append(message.NewPart(msgBytes))
 		}
 	} else {
 		var msgBytes []byte
-		if msgBytes, err = ioutil.ReadAll(r.Body); err != nil {
+		if msgBytes, err = io.ReadAll(r.Body); err != nil {
 			return nil, err
 		}
 		msg.Append(message.NewPart(msgBytes))
@@ -372,6 +376,7 @@ func (h *HTTPServer) extractMessageFromRequest(r *http.Request) (types.Message, 
 	meta := metadata.New(nil)
 	meta.Set("http_server_user_agent", r.UserAgent())
 	meta.Set("http_server_request_path", r.URL.Path)
+	meta.Set("http_server_verb", r.Method)
 	for k, v := range r.Header {
 		if len(v) > 0 {
 			meta.Set(k, v[0])
@@ -390,14 +395,14 @@ func (h *HTTPServer) extractMessageFromRequest(r *http.Request) (types.Message, 
 	}
 	message.SetAllMetadata(msg, meta)
 
-	// Try to either extract parent span from headers, or create a new one.
-	carrier := opentracing.HTTPHeadersCarrier(r.Header)
-	if clientSpanContext, serr := opentracing.GlobalTracer().Extract(opentracing.HTTPHeaders, carrier); serr == nil {
-		tracing.InitSpansFromParent("input_http_server_post", clientSpanContext, msg)
-	} else {
-		tracing.InitSpans("input_http_server_post", msg)
+	textMapGeneric := map[string]interface{}{}
+	for k, vals := range r.Header {
+		for _, v := range vals {
+			textMapGeneric[k] = v
+		}
 	}
 
+	_ = tracing.InitSpansFromParentTextMap("input_http_server_post", textMapGeneric, msg)
 	return msg, nil
 }
 
@@ -449,14 +454,18 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 	h.mRcvd.Incr(1)
 	h.log.Tracef("Consumed %v messages from POST to '%v'.\n", msg.Len(), h.conf.Path)
 
-	resChan := make(chan types.Response)
+	resChan := make(chan types.Response, 1)
 	select {
 	case h.transactions <- types.NewTransaction(msg, resChan):
 	case <-time.After(h.timeout):
 		h.mTimeout.Incr(1)
 		http.Error(w, "Request timed out", http.StatusRequestTimeout)
 		return
-	case <-h.closeChan:
+	case <-r.Context().Done():
+		h.mTimeout.Incr(1)
+		http.Error(w, "Request timed out", http.StatusRequestTimeout)
+		return
+	case <-h.shutSig.CloseAtLeisureChan():
 		http.Error(w, "Server closing", http.StatusServiceUnavailable)
 		return
 	}
@@ -477,19 +486,13 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(h.timeout):
 		h.mTimeout.Incr(1)
 		http.Error(w, "Request timed out", http.StatusRequestTimeout)
-		go func() {
-			// Even if the request times out, we still need to drain a response.
-			resAsync := <-resChan
-			if resAsync.Error() != nil {
-				h.mAsyncErr.Incr(1)
-				h.mErr.Incr(1)
-			} else {
-				tTaken := time.Since(msg.CreatedAt()).Nanoseconds()
-				h.mLatency.Timing(tTaken)
-				h.mAsyncSucc.Incr(1)
-				h.mSucc.Incr(1)
-			}
-		}()
+		return
+	case <-r.Context().Done():
+		h.mTimeout.Incr(1)
+		http.Error(w, "Request timed out", http.StatusRequestTimeout)
+		return
+	case <-h.shutSig.CloseNowChan():
+		http.Error(w, "Server closing", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -515,21 +518,37 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if plen := responseMsg.Len(); plen == 1 {
-			payload := responseMsg.Get(0).Get()
+			part := responseMsg.Get(0)
+			part.Metadata().Iter(func(k, v string) error {
+				if h.metaFilter.Match(k) {
+					w.Header().Set(k, v)
+					return nil
+				}
+				return nil
+			})
+			payload := part.Get()
 			if w.Header().Get("Content-Type") == "" {
 				w.Header().Set("Content-Type", http.DetectContentType(payload))
 			}
 			w.WriteHeader(statusCode)
 			w.Write(payload)
 		} else if plen > 1 {
-			customContentType, customContentTypeExists := h.responseHeaders["Content-Type"]
+			customContentType, customContentTypeExists := h.responseHeaders["content-type"]
 
 			var buf bytes.Buffer
 			writer := multipart.NewWriter(&buf)
 
 			var merr error
 			for i := 0; i < plen && merr == nil; i++ {
-				payload := responseMsg.Get(i).Get()
+				part := responseMsg.Get(i)
+				part.Metadata().Iter(func(k, v string) error {
+					if h.metaFilter.Match(k) {
+						w.Header().Set(k, v)
+						return nil
+					}
+					return nil
+				})
+				payload := part.Get()
 
 				mimeHeader := textproto.MIMEHeader{}
 				if customContentTypeExists {
@@ -538,9 +557,9 @@ func (h *HTTPServer) postHandler(w http.ResponseWriter, r *http.Request) {
 					mimeHeader.Set("Content-Type", http.DetectContentType(payload))
 				}
 
-				var part io.Writer
-				if part, merr = writer.CreatePart(mimeHeader); merr == nil {
-					_, merr = io.Copy(part, bytes.NewReader(payload))
+				var partWriter io.Writer
+				if partWriter, merr = writer.CreatePart(mimeHeader); merr == nil {
+					_, merr = io.Copy(partWriter, bytes.NewReader(payload))
 				}
 			}
 
@@ -578,8 +597,8 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	resChan := make(chan types.Response)
-	throt := throttle.New(throttle.OptCloseChan(h.closeChan))
+	resChan := make(chan types.Response, 1)
+	throt := throttle.New(throttle.OptCloseChan(h.shutSig.CloseAtLeisureChan()))
 
 	if welMsg := h.conf.WSWelcomeMessage; len(welMsg) > 0 {
 		if err = ws.WriteMessage(websocket.BinaryMessage, []byte(welMsg)); err != nil {
@@ -588,7 +607,7 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var msgBytes []byte
-	for atomic.LoadInt32(&h.running) == 1 {
+	for !h.shutSig.ShouldCloseAtLeisure() {
 		if msgBytes == nil {
 			if _, msgBytes, err = ws.ReadMessage(); err != nil {
 				return
@@ -646,7 +665,7 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 
 		select {
 		case h.transactions <- types.NewTransaction(msg, resChan):
-		case <-h.closeChan:
+		case <-h.shutSig.CloseAtLeisureChan():
 			return
 		}
 		select {
@@ -666,7 +685,7 @@ func (h *HTTPServer) wsHandler(w http.ResponseWriter, r *http.Request) {
 				msgBytes = nil
 				throt.Reset()
 			}
-		case <-h.closeChan:
+		case <-h.shutSig.CloseNowChan():
 			return
 		}
 
@@ -688,11 +707,16 @@ func (h *HTTPServer) loop() {
 	mRunning := h.stats.GetGauge("running")
 
 	defer func() {
-		atomic.StoreInt32(&h.running, 0)
-
 		if h.server != nil {
 			if err := h.server.Shutdown(context.Background()); err != nil {
 				h.log.Errorf("Failed to gracefully terminate http_server: %v\n", err)
+			}
+		} else {
+			if len(h.conf.Path) > 0 {
+				h.mgr.RegisterEndpoint(h.conf.Path, "Does nothing.", http.NotFound)
+			}
+			if len(h.conf.WSPath) > 0 {
+				h.mgr.RegisterEndpoint(h.conf.WSPath, "Does nothing.", http.NotFound)
 			}
 		}
 
@@ -700,7 +724,7 @@ func (h *HTTPServer) loop() {
 		mRunning.Decr(1)
 
 		close(h.transactions)
-		close(h.closedChan)
+		h.shutSig.ShutdownComplete()
 	}()
 	mRunning.Incr(1)
 
@@ -728,7 +752,7 @@ func (h *HTTPServer) loop() {
 		}()
 	}
 
-	<-h.closeChan
+	<-h.shutSig.CloseAtLeisureChan()
 }
 
 // TransactionChan returns a transactions channel for consuming messages from
@@ -745,15 +769,17 @@ func (h *HTTPServer) Connected() bool {
 
 // CloseAsync shuts down the HTTPServer input and stops processing requests.
 func (h *HTTPServer) CloseAsync() {
-	if atomic.CompareAndSwapInt32(&h.running, 1, 0) {
-		close(h.closeChan)
-	}
+	h.shutSig.CloseAtLeisure()
 }
 
 // WaitForClose blocks until the HTTPServer input has closed down.
 func (h *HTTPServer) WaitForClose(timeout time.Duration) error {
+	go func() {
+		<-time.After(timeout - time.Second)
+		h.shutSig.CloseNow()
+	}()
 	select {
-	case <-h.closedChan:
+	case <-h.shutSig.HasClosedChan():
 	case <-time.After(timeout):
 		return types.ErrTimeout
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -18,7 +19,6 @@ import (
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
-	"github.com/opentracing/opentracing-go"
 )
 
 //------------------------------------------------------------------------------
@@ -58,7 +58,7 @@ Attempts to create a target protobuf message from a generic JSON structure.`,
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("operator", "The [operator](#operators) to execute").HasOptions("to_json", "from_json"),
 			docs.FieldCommon("message", "The fully qualified name of the protobuf message to convert to/from."),
-			docs.FieldCommon("import_paths", "A list of directories containing .proto files, including all definitions required for parsing the target message. If left empty the current directory is used. Each directory listed will be walked with all found .proto files imported.").Array(),
+			docs.FieldString("import_paths", "A list of directories containing .proto files, including all definitions required for parsing the target message. If left empty the current directory is used. Each directory listed will be walked with all found .proto files imported.").Array(),
 			docs.FieldDeprecated("import_path"),
 			PartsFieldSpec,
 		},
@@ -335,7 +335,7 @@ func (p *Protobuf) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 	p.mCount.Incr(1)
 	newMsg := msg.Copy()
 
-	proc := func(index int, span opentracing.Span, part types.Part) error {
+	proc := func(index int, span *tracing.Span, part types.Part) error {
 		if err := p.operator(part); err != nil {
 			p.mErr.Incr(1)
 			p.log.Debugf("Operator failed: %v\n", err)
@@ -344,7 +344,7 @@ func (p *Protobuf) ProcessMessage(msg types.Message) ([]types.Message, types.Res
 		return nil
 	}
 
-	IteratePartsWithSpan(TypeProtobuf, p.parts, newMsg, proc)
+	IteratePartsWithSpanV2(TypeProtobuf, p.parts, newMsg, proc)
 
 	p.mBatchSent.Incr(1)
 	p.mSent.Incr(int64(newMsg.Len()))

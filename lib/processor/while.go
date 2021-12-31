@@ -6,18 +6,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/condition"
 	"github.com/Jeffail/benthos/v3/lib/log"
-	"github.com/Jeffail/benthos/v3/lib/message/tracing"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
 	"github.com/Jeffail/benthos/v3/lib/types"
 	"github.com/google/go-cmp/cmp"
-	opentracinglog "github.com/opentracing/opentracing-go/log"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -40,13 +38,13 @@ If following a loop execution the number of messages in a batch is reduced to ze
 		FieldSpecs: docs.FieldSpecs{
 			docs.FieldCommon("at_least_once", "Whether to always run the child processors at least one time."),
 			docs.FieldAdvanced("max_loops", "An optional maximum number of loops to execute. Helps protect against accidentally creating infinite loops."),
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"check",
 				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether the while loop should execute again.",
 				`errored()`,
 				`this.urls.unprocessed.length() > 0`,
-			).HasDefault("").Linter(docs.LintBloblangMapping),
-			docs.FieldDeprecated("condition").HasType(docs.FieldCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
+			).HasDefault(""),
+			docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
 				defaultBytes, err := yaml.Marshal(condition.NewConfig())
 				if err != nil {
 					return "", false
@@ -57,7 +55,7 @@ If following a loop execution the number of messages in a batch is reduced to ze
 				}
 				return "field condition is deprecated in favour of check", cmp.Equal(v, iDefault)
 			}),
-			docs.FieldCommon("processors", "A list of child processors to execute on each loop.").Array().HasType(docs.FieldProcessor),
+			docs.FieldCommon("processors", "A list of child processors to execute on each loop.").Array().HasType(docs.FieldTypeProcessor),
 		},
 	}
 }
@@ -121,7 +119,7 @@ func NewWhile(
 		}
 	}
 	if len(conf.While.Check) > 0 {
-		if check, err = bloblang.NewMapping("", conf.While.Check); err != nil {
+		if check, err = interop.NewBloblangMapping(mgr, conf.While.Check); err != nil {
 			return nil, fmt.Errorf("failed to parse check query: %w", err)
 		}
 	}
@@ -198,7 +196,7 @@ func (w *While) ProcessMessage(msg types.Message) (msgs []types.Message, res typ
 		w.mLoop.Incr(1)
 		w.log.Traceln("Looped")
 		for _, s := range spans {
-			s.LogFields(opentracinglog.Event("loop"))
+			s.LogKV("event", "loop")
 		}
 
 		msgs, res = ExecuteAll(w.children, msgs...)

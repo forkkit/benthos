@@ -3,11 +3,11 @@ package auth
 import (
 	"crypto/rsa"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"sync"
 
-	"github.com/dgrijalva/jwt-go"
+	"github.com/golang-jwt/jwt"
 )
 
 //------------------------------------------------------------------------------
@@ -21,17 +21,19 @@ type JWTConfig struct {
 
 	// internal private fields
 	rsaKeyMx *sync.Mutex
-	rsaKey   *rsa.PrivateKey
+	rsaKey   **rsa.PrivateKey
 }
 
 // NewJWTConfig returns a new JWTConfig with default values.
 func NewJWTConfig() JWTConfig {
+	var privKey *rsa.PrivateKey
 	return JWTConfig{
 		Enabled:        false,
 		Claims:         map[string]interface{}{},
 		SigningMethod:  "",
 		PrivateKeyFile: "",
 		rsaKeyMx:       &sync.Mutex{},
+		rsaKey:         &privKey,
 	}
 }
 
@@ -59,7 +61,7 @@ func (j JWTConfig) Sign(req *http.Request) error {
 		return fmt.Errorf("jwt signing method %s not acepted. Try with RS256, RS384 or RS512", j.SigningMethod)
 	}
 
-	ss, err := bearer.SignedString(j.rsaKey)
+	ss, err := bearer.SignedString(*j.rsaKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign jwt: %v", err)
 	}
@@ -74,16 +76,16 @@ func (j JWTConfig) parsePrivateKey() error {
 	j.rsaKeyMx.Lock()
 	defer j.rsaKeyMx.Unlock()
 
-	if j.rsaKey != nil {
+	if *j.rsaKey != nil {
 		return nil
 	}
 
-	privateKey, err := ioutil.ReadFile(j.PrivateKeyFile)
+	privateKey, err := os.ReadFile(j.PrivateKeyFile)
 	if err != nil {
 		return fmt.Errorf("failed to read private key: %v", err)
 	}
 
-	j.rsaKey, err = jwt.ParseRSAPrivateKeyFromPEM(privateKey)
+	*j.rsaKey, err = jwt.ParseRSAPrivateKeyFromPEM(privateKey)
 	if err != nil {
 		return fmt.Errorf("failed to parse private key: %v", err)
 	}

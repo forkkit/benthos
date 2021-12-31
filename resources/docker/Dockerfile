@@ -1,13 +1,21 @@
-FROM golang:1.16 AS build
+FROM golang:1.17 AS build
 
+ENV CGO_ENABLED=0
+ENV GOOS=linux
 RUN useradd -u 10001 benthos
 
 WORKDIR /go/src/github.com/Jeffail/benthos/
+# Update dependencies: On unchanged dependencies, cached layer will be reused
+COPY go.* /go/src/github.com/Jeffail/benthos/
+RUN go mod download
+
+# Build
 COPY . /go/src/github.com/Jeffail/benthos/
+# Tag timetzdata required for busybox base image:
+# https://github.com/Jeffail/benthos/issues/897
+RUN make TAGS="timetzdata"
 
-ENV GO111MODULE on
-RUN CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=vendor make
-
+# Pack
 FROM busybox AS package
 
 LABEL maintainer="Ashley Jeffs <ash@jeffail.uk>"

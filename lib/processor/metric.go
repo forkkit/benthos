@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
@@ -38,7 +38,7 @@ Custom metrics such as these are emitted along with Benthos internal metrics, wh
 			),
 			docs.FieldDeprecated("path"),
 			docs.FieldCommon("name", "The name of the metric to create, this must be unique across all Benthos components otherwise it will overwrite those other metrics."),
-			docs.FieldCommon(
+			docs.FieldString(
 				"labels", "A map of label names and values that can be used to enrich metrics. Labels are not supported by some metric destinations, in which case the metrics series are combined.",
 				map[string]string{
 					"type":  "${! json(\"doc.type\") }",
@@ -227,7 +227,7 @@ func unwrapMetric(t metrics.Type) metrics.Type {
 func NewMetric(
 	conf Config, mgr types.Manager, log log.Modular, stats metrics.Type,
 ) (Type, error) {
-	value, err := bloblang.NewField(conf.Metric.Value)
+	value, err := interop.NewBloblangField(mgr, conf.Metric.Value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse value expression: %v", err)
 	}
@@ -266,7 +266,7 @@ func NewMetric(
 	sort.Strings(labelNames)
 
 	for _, n := range labelNames {
-		v, err := bloblang.NewField(conf.Metric.Labels[n])
+		v, err := interop.NewBloblangField(mgr, conf.Metric.Labels[n])
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse label '%v' expression: %v", n, err)
 		}

@@ -31,13 +31,13 @@ the original message parts with the body of the response.
 # Common config fields, showing default values
 label: ""
 http:
-  parallel: false
   url: http://localhost:4195/post
   verb: POST
   headers:
     Content-Type: application/octet-stream
   rate_limit: ""
   timeout: 5s
+  parallel: false
 ```
 
 </TabItem>
@@ -47,7 +47,6 @@ http:
 # All config fields, showing default values
 label: ""
 http:
-  parallel: false
   url: http://localhost:4195/post
   verb: POST
   headers:
@@ -78,9 +77,12 @@ http:
     enabled: false
     skip_cert_verify: false
     enable_renegotiation: false
+    root_cas: ""
     root_cas_file: ""
     client_certs: []
-  copy_response_headers: false
+  extract_headers:
+    include_prefixes: []
+    include_patterns: []
   rate_limit: ""
   timeout: 5s
   retry_period: 1s
@@ -91,6 +93,7 @@ http:
   drop_on: []
   successful_on: []
   proxy_url: ""
+  parallel: false
 ```
 
 </TabItem>
@@ -129,9 +132,9 @@ will not be reattempted and is immediately considered a failed request.
 If the request returns an error response code this processor sets a metadata
 field `http_status_code` on the resulting message.
 
-If the field `copy_response_headers` is set to `true` then any headers
-in the response will also be set in the resulting message as metadata.
- 
+Use the field `extract_headers` to specify rules for which other
+headers should be copied into the resulting message from the response.
+
 ## Error Handling
 
 When all retry attempts for a message are exhausted the processor cancels the
@@ -166,14 +169,6 @@ pipeline:
 </Tabs>
 
 ## Fields
-
-### `parallel`
-
-When processing batched messages, whether to send messages of the batch in parallel, otherwise they are sent within a single request.
-
-
-Type: `bool`  
-Default: `false`  
 
 ### `url`
 
@@ -423,6 +418,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -443,6 +455,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -488,13 +501,49 @@ The path of a certificate key to use.
 Type: `string`  
 Default: `""`  
 
-### `copy_response_headers`
+### `extract_headers`
 
-Sets whether to copy the headers from the response to the resulting payload.
+Specify which response headers should be added to resulting messages as metadata.
 
 
-Type: `bool`  
-Default: `false`  
+Type: `object`  
+
+### `extract_headers.include_prefixes`
+
+Provide a list of explicit metadata key prefixes to be included when adding metadata to sent messages.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yaml
+# Examples
+
+include_prefixes:
+  - foo_
+  - bar_
+
+include_prefixes:
+  - kafka_
+```
+
+### `extract_headers.include_patterns`
+
+Provide a list of explicit metadata key regexp patterns to be included when adding metadata to sent messages.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yaml
+# Examples
+
+include_patterns:
+  - .*
+
+include_patterns:
+  - _timestamp_unix$
+```
 
 ### `rate_limit`
 
@@ -533,7 +582,7 @@ Default: `"300s"`
 The maximum number of retry attempts to make.
 
 
-Type: `number`  
+Type: `int`  
 Default: `3`  
 
 ### `backoff_on`
@@ -567,5 +616,13 @@ An optional HTTP proxy URL.
 
 Type: `string`  
 Default: `""`  
+
+### `parallel`
+
+When processing batched messages, whether to send messages of the batch in parallel, otherwise they are sent within a single request.
+
+
+Type: `bool`  
+Default: `false`  
 
 

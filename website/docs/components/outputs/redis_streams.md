@@ -39,6 +39,11 @@ output:
     max_in_flight: 1
     metadata:
       exclude_prefixes: []
+    batching:
+      count: 0
+      byte_size: 0
+      period: ""
+      check: ""
 ```
 
 </TabItem>
@@ -56,6 +61,7 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     stream: benthos_stream
@@ -64,6 +70,12 @@ output:
     max_in_flight: 1
     metadata:
       exclude_prefixes: []
+    batching:
+      count: 0
+      byte_size: 0
+      period: ""
+      check: ""
+      processors: []
 ```
 
 </TabItem>
@@ -84,11 +96,15 @@ This output benefits from sending multiple messages in flight in parallel for
 improved performance. You can tune the max number of in flight messages with the
 field `max_in_flight`.
 
+This output benefits from sending messages as a batch for improved performance.
+Batches can be formed at both the input and output level. You can find out more
+[in this doc](/docs/configuration/batching).
+
 ## Fields
 
 ### `url`
 
-The URL of the target Redis server. Database is optional and is supplied as the URL path. `tcp` scheme is the same as `redis`
+The URL of the target Redis server. Database is optional and is supplied as the URL path. The scheme `tcp` is equivalent to `redis`.
 
 
 Type: `string`  
@@ -102,6 +118,8 @@ url: :6397
 url: localhost:6397
 
 url: redis://localhost:6379
+
+url: redis://:foopassword@redisplace:6379
 
 url: redis://localhost:6379/1
 
@@ -144,6 +162,10 @@ master: mymaster
 
 Custom TLS settings can be used to override system defaults.
 
+### Troubleshooting
+
+Some cloud hosted instances of Redis (such as Azure Cache) might need some hand holding in order to establish stable connections. Unfortunately, it is often the case that TLS issues will manifest as generic error messages such as "i/o timeout". If you're using TLS and are seeing connectivity problems consider setting `enable_renegotiation` to `true`, and ensuring that the server supports at least TLS version 1.2.
+
 
 Type: `object`  
 
@@ -172,6 +194,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -192,6 +231,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -283,5 +323,101 @@ Provide a list of explicit metadata key prefixes to be excluded when adding meta
 
 Type: `array`  
 Default: `[]`  
+
+### `batching`
+
+Allows you to configure a [batching policy](/docs/configuration/batching).
+
+
+Type: `object`  
+
+```yaml
+# Examples
+
+batching:
+  byte_size: 5000
+  count: 0
+  period: 1s
+
+batching:
+  count: 10
+  period: 1s
+
+batching:
+  check: this.contains("END BATCH")
+  count: 0
+  period: 1m
+```
+
+### `batching.count`
+
+A number of messages at which the batch should be flushed. If `0` disables count based batching.
+
+
+Type: `int`  
+Default: `0`  
+
+### `batching.byte_size`
+
+An amount of bytes at which the batch should be flushed. If `0` disables size based batching.
+
+
+Type: `int`  
+Default: `0`  
+
+### `batching.period`
+
+A period in which an incomplete batch should be flushed regardless of its size.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+period: 1s
+
+period: 1m
+
+period: 500ms
+```
+
+### `batching.check`
+
+A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message should end a batch.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+check: this.type == "end_of_transaction"
+```
+
+### `batching.processors`
+
+A list of [processors](/docs/components/processors/about) to apply to a batch as it is flushed. This allows you to aggregate and archive the batch however you see fit. Please note that all resulting messages are flushed as a single batch, therefore splitting the batch into smaller batches using these processors is a no-op.
+
+
+Type: `array`  
+Default: `[]`  
+
+```yaml
+# Examples
+
+processors:
+  - archive:
+      format: lines
+
+processors:
+  - archive:
+      format: json_array
+
+processors:
+  - merge_json: {}
+```
 
 

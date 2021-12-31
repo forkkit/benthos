@@ -39,7 +39,12 @@ var (
 	ValueNull    ValueType = "null"
 	ValueDelete  ValueType = "delete"
 	ValueNothing ValueType = "nothing"
+	ValueQuery   ValueType = "query expression"
 	ValueUnknown ValueType = "unknown"
+
+	// Specialised and not generally known over ValueNumber.
+	ValueInt   ValueType = "integer"
+	ValueFloat ValueType = "float"
 )
 
 // ITypeOf returns the type of a boxed value as a discrete ValueType. If the
@@ -64,6 +69,9 @@ func ITypeOf(i interface{}) ValueType {
 		return ValueNothing
 	case nil:
 		return ValueNull
+	}
+	if _, isDyn := i.(Function); isDyn {
+		return ValueQuery
 	}
 	return ValueUnknown
 }
@@ -219,7 +227,7 @@ func ISanitize(i interface{}) interface{} {
 		return []byte(t)
 	case json.Number:
 		if i, err := t.Int64(); err == nil {
-			return int64(i)
+			return i
 		}
 		if f, err := t.Float64(); err == nil {
 			return f
@@ -313,7 +321,7 @@ func IToNumber(v interface{}) (float64, error) {
 }
 
 const maxUint = ^uint64(0)
-const maxInt = uint64(maxUint >> 1)
+const maxInt = maxUint >> 1
 
 // IToInt takes a boxed value and attempts to extract a number (int64) from it
 // or parse one.

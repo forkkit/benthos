@@ -32,7 +32,7 @@ message brokers, including RabbitMQ.
 input:
   label: ""
   amqp_0_9:
-    url: amqp://guest:guest@localhost:5672/
+    urls: []
     queue: benthos-queue
     consumer_tag: benthos-consumer
     prefetch_count: 10
@@ -46,7 +46,7 @@ input:
 input:
   label: ""
   amqp_0_9:
-    url: amqp://guest:guest@localhost:5672/
+    urls: []
     queue: benthos-queue
     queue_declare:
       enabled: false
@@ -60,6 +60,7 @@ input:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
 ```
@@ -100,20 +101,27 @@ You can access these metadata fields using
 
 ## Fields
 
-### `url`
+### `urls`
 
-A URL to connect to.
+A list of URLs to connect to. The first URL to successfully establish a connection will be used until the connection is closed. If an item of the list contains commas it will be expanded into multiple URLs.
 
 
-Type: `string`  
-Default: `"amqp://guest:guest@localhost:5672/"`  
+Type: `array`  
+Default: `[]`  
+Requires version 3.58.0 or newer  
 
 ```yaml
 # Examples
 
-url: amqp://localhost:5672/
+urls:
+  - amqp://guest:guest@127.0.0.1:5672/
 
-url: amqps://guest:guest@localhost:5672/
+urls:
+  - amqp://127.0.0.1:5672/,amqp://127.0.0.2:5672/
+
+urls:
+  - amqp://127.0.0.1:5672/
+  - amqp://127.0.0.2:5672/
 ```
 
 ### `queue`
@@ -154,6 +162,7 @@ Allows you to passively declare bindings for the target queue.
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -243,6 +252,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -263,6 +289,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples

@@ -15,7 +15,7 @@ import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
 
-Send spans to a [Jaeger](https://www.jaegertracing.io/) agent.
+Send tracing events to a [Jaeger](https://www.jaegertracing.io/) agent or collector.
 
 
 <Tabs defaultValue="common" values={[
@@ -124,7 +124,7 @@ Default: `""`
 A parameter to use for sampling. This field is unused for some sampling types.
 
 
-Type: `int`  
+Type: `float`  
 Default: `1`  
 
 ### `tags`

@@ -15,7 +15,9 @@ categories: ["Services","GCP"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-BETA: This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::caution BETA
+This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::
 
 Sends message parts as objects to a Google Cloud Storage bucket. Each object is
 uploaded with the path specified with the `path` field.
@@ -38,6 +40,7 @@ output:
     bucket: ""
     path: ${!count("files")}-${!timestamp_unix_nano()}.txt
     content_type: application/octet-stream
+    collision_mode: overwrite
     max_in_flight: 1
     batching:
       count: 0
@@ -57,6 +60,7 @@ output:
     bucket: ""
     path: ${!count("files")}-${!timestamp_unix_nano()}.txt
     content_type: application/octet-stream
+    collision_mode: overwrite
     content_encoding: ""
     chunk_size: 16777216
     max_in_flight: 1
@@ -82,7 +86,7 @@ Metadata fields on messages will be sent as headers, in order to mutate these va
 ### Credentials
 
 By default Benthos will use a shared credentials file when connecting to GCP
-services. You can find out more [in this document](/docs/guides/gcp).
+services. You can find out more [in this document](/docs/guides/cloud/gcp).
 
 ### Batching
 
@@ -172,6 +176,23 @@ This field supports [interpolation functions](/docs/configuration/interpolation#
 
 Type: `string`  
 Default: `"application/octet-stream"`  
+
+### `collision_mode`
+
+Determines how file path collisions should be dealt with.
+
+
+Type: `string`  
+Default: `"overwrite"`  
+Requires version 3.53.0 or newer  
+
+| Option | Summary |
+|---|---|
+| `overwrite` | Replace the existing file with the new one. |
+| `append` | Append the message bytes to the original file. |
+| `error-if-exists` | Return an error, this is the equivalent of a nack. |
+| `ignore` | Do not modify the original file, the new data will be dropped. |
+
 
 ### `content_encoding`
 

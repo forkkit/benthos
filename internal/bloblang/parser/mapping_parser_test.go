@@ -2,19 +2,17 @@ package parser
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang/query"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMappingErrors(t *testing.T) {
-	dir, err := ioutil.TempDir("", "benthos_mapping_errors")
+	dir, err := os.MkdirTemp("", "benthos_mapping_errors")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		os.RemoveAll(dir)
@@ -24,34 +22,34 @@ func TestMappingErrors(t *testing.T) {
 	noMapsFile := filepath.Join(dir, "no_maps.blobl")
 	goodMapFile := filepath.Join(dir, "good_map.blobl")
 
-	require.NoError(t, ioutil.WriteFile(badMapFile, []byte(`not a map bruh`), 0777))
-	require.NoError(t, ioutil.WriteFile(noMapsFile, []byte(`foo = "this is valid but has no maps"`), 0777))
-	require.NoError(t, ioutil.WriteFile(goodMapFile, []byte(`map foo { foo = "this is valid" }`), 0777))
+	require.NoError(t, os.WriteFile(badMapFile, []byte(`not a map bruh`), 0o777))
+	require.NoError(t, os.WriteFile(noMapsFile, []byte(`foo = "this is valid but has no maps"`), 0o777))
+	require.NoError(t, os.WriteFile(goodMapFile, []byte(`map foo { foo = "this is valid" }`), 0o777))
 
 	tests := map[string]struct {
-		mapping string
-		err     string
+		mapping     string
+		errContains string
 	}{
 		"bad variable name": {
-			mapping: `let foo+bar = baz`,
-			err:     "line 1 char 8: expected whitespace",
+			mapping:     `let foo+bar = baz`,
+			errContains: "line 1 char 8: expected whitespace",
 		},
 		"bad meta name": {
-			mapping: `meta foo+bar = baz`,
-			err:     "line 1 char 9: expected =",
+			mapping:     `meta foo+bar = baz`,
+			errContains: "line 1 char 9: expected =",
 		},
 		"no mappings": {
-			mapping: ``,
-			err:     `line 1 char 1: expected import, map, or assignment`,
+			mapping:     ``,
+			errContains: `line 1 char 1: expected import, map, or assignment`,
 		},
 		"no mappings 2": {
 			mapping: `
    `,
-			err: `line 2 char 4: expected import, map, or assignment`,
+			errContains: `line 2 char 4: expected import, map, or assignment`,
 		},
 		"double mapping": {
-			mapping: `foo = bar bar = baz`,
-			err:     `line 1 char 11: expected line break`,
+			mapping:     `foo = bar bar = baz`,
+			errContains: `line 1 char 11: expected line break`,
 		},
 		"double mapping line breaks": {
 			mapping: `
@@ -59,50 +57,50 @@ func TestMappingErrors(t *testing.T) {
 foo = bar bar = baz
 
 `,
-			err: `line 3 char 11: expected line break`,
+			errContains: `line 3 char 11: expected line break`,
 		},
 		"double mapping line 2": {
 			mapping: `let a = "a"
 foo = bar bar = baz`,
-			err: `line 2 char 11: expected line break`,
+			errContains: `line 2 char 11: expected line break`,
 		},
 		"double mapping line 3": {
 			mapping: `let a = "a"
 foo = bar bar = baz
 	let a = "a"`,
-			err: "line 2 char 11: expected line break",
+			errContains: "line 2 char 11: expected line break",
 		},
 		"bad mapping": {
-			mapping: `foo wat bar`,
-			err:     `line 1 char 5: expected =`,
+			mapping:     `foo wat bar`,
+			errContains: `line 1 char 5: expected =`,
 		},
 		"bad char": {
-			mapping: `!foo = bar`,
-			err:     "line 1 char 6: expected the mapping to end here as the beginning is shorthand for `root = !foo`, but this shorthand form cannot be followed with more assignments",
+			mapping:     `!foo = bar`,
+			errContains: "line 1 char 6: expected the mapping to end here as the beginning is shorthand for `root = !foo`, but this shorthand form cannot be followed with more assignments",
 		},
 		"bad inline query": {
 			mapping: `content().uppercase().lowercase()
 meta foo = "bar"`,
-			err: "line 2 char 1: expected the mapping to end here as the beginning is shorthand for `root = content().up...`, but this shorthand form cannot be followed with more assignments",
+			errContains: "line 2 char 1: expected the mapping to end here as the beginning is shorthand for `root = content().up...`, but this shorthand form cannot be followed with more assignments",
 		},
 		"bad char 2": {
 			mapping: `let foo = bar
 !foo = bar`,
-			err: `line 2 char 1: expected import, map, or assignment`,
+			errContains: `line 2 char 1: expected import, map, or assignment`,
 		},
 		"bad char 3": {
 			mapping: `let foo = bar
 !foo = bar
 this = that`,
-			err: `line 2 char 1: expected import, map, or assignment`,
+			errContains: `line 2 char 1: expected import, map, or assignment`,
 		},
 		"bad query": {
-			mapping: `foo = blah.`,
-			err:     `line 1 char 12: required: expected method or field path`,
+			mapping:     `foo = blah.`,
+			errContains: `line 1 char 12: required: expected method or field path`,
 		},
 		"bad variable assign": {
-			mapping: `let = blah`,
-			err:     `line 1 char 5: required: expected variable name`,
+			mapping:     `let = blah`,
+			errContains: `line 1 char 5: required: expected variable name`,
 		},
 		"double map definition": {
 			mapping: `map foo {
@@ -112,39 +110,39 @@ map foo {
   foo = bar
 }
 foo = bar.apply("foo")`,
-			err: `line 4 char 1: map name collision: foo`,
+			errContains: `line 4 char 1: map name collision: foo`,
 		},
 		"map contains meta assignment": {
 			mapping: `map foo {
   meta foo = "bar"
 }
 foo = bar.apply("foo")`,
-			err: `line 2 char 3: setting meta fields from within a map is not allowed`,
+			errContains: `line 2 char 3: setting meta fields from within a map is not allowed`,
 		},
 		"no name map definition": {
 			mapping: `map {
   foo = bar
 }
 foo = bar.apply("foo")`,
-			err: `line 1 char 5: required: expected map name`,
+			errContains: `line 1 char 5: required: expected map name`,
 		},
 		"no file import": {
 			mapping: `import "this file doesnt exist (i hope)"
 
 foo = bar.apply("from_import")`,
-			err: `line 1 char 1: failed to read import: open this file doesnt exist (i hope): no such file or directory`,
+			errContains: `this file doesnt exist (i hope): no such file or directory`,
 		},
 		"bad file import": {
 			mapping: fmt.Sprintf(`import "%v"
 
 foo = bar.apply("from_import")`, badMapFile),
-			err: fmt.Sprintf(`line 1 char 1: failed to parse import '%v': line 1 char 5: expected =`, badMapFile),
+			errContains: fmt.Sprintf(`line 1 char 1: failed to parse import '%v': line 1 char 5: expected =`, badMapFile),
 		},
 		"no maps file import": {
 			mapping: fmt.Sprintf(`import "%v"
 
 foo = bar.apply("from_import")`, noMapsFile),
-			err: fmt.Sprintf(`line 1 char 1: no maps to import from '%v'`, noMapsFile),
+			errContains: fmt.Sprintf(`line 1 char 1: no maps to import from '%v'`, noMapsFile),
 		},
 		"colliding maps file import": {
 			mapping: fmt.Sprintf(`map "foo" { this = that }			
@@ -152,44 +150,41 @@ foo = bar.apply("from_import")`, noMapsFile),
 import "%v"
 
 foo = bar.apply("foo")`, goodMapFile),
-			err: fmt.Sprintf(`line 3 char 1: map name collisions from import '%v': [foo]`, goodMapFile),
+			errContains: fmt.Sprintf(`line 3 char 1: map name collisions from import '%v': [foo]`, goodMapFile),
 		},
 		"quotes at root": {
 			mapping: `
 "root.something" = 5 + 2`,
-			err: "line 2 char 1: expected import, map, or assignment",
+			errContains: "line 2 char 1: expected import, map, or assignment",
 		},
 	}
 
 	for name, test := range tests {
 		test := test
 		t.Run(name, func(t *testing.T) {
-			exec, err := ParseMapping("", test.mapping, Context{
-				Functions: query.AllFunctions,
-				Methods:   query.AllMethods,
-			})
+			exec, err := ParseMapping(GlobalContext(), test.mapping)
 			require.NotNil(t, err)
-			assert.Equal(t, test.err, err.ErrorAtPosition([]rune(test.mapping)))
+			assert.Contains(t, err.ErrorAtPosition([]rune(test.mapping)), test.errContains)
 			assert.Nil(t, exec)
 		})
 	}
 }
 
 func TestMappings(t *testing.T) {
-	dir, err := ioutil.TempDir("", "benthos_mapping")
+	dir, err := os.MkdirTemp("", "benthos_mapping")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		os.RemoveAll(dir)
 	})
 
 	goodMapFile := filepath.Join(dir, "foo_map.blobl")
-	require.NoError(t, ioutil.WriteFile(goodMapFile, []byte(`map foo {
+	require.NoError(t, os.WriteFile(goodMapFile, []byte(`map foo {
   foo = "this is valid"
   nested = this
-}`), 0777))
+}`), 0o777))
 
 	directMapFile := filepath.Join(dir, "direct_map.blobl")
-	require.NoError(t, ioutil.WriteFile(directMapFile, []byte(`root.nested = this`), 0777))
+	require.NoError(t, os.WriteFile(directMapFile, []byte(`root.nested = this`), 0o777))
 
 	type part struct {
 		Content string
@@ -495,10 +490,7 @@ root = this.apply("foo")`, goodMapFile),
 				test.output.Meta = map[string]string{}
 			}
 
-			exec, perr := ParseMapping("", test.mapping, Context{
-				Functions: query.AllFunctions,
-				Methods:   query.AllMethods,
-			})
+			exec, perr := ParseMapping(GlobalContext(), test.mapping)
 			require.Nil(t, perr)
 
 			resPart, err := exec.MapPart(test.index, msg)

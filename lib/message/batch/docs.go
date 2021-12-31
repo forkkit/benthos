@@ -6,6 +6,7 @@ import "github.com/Jeffail/benthos/v3/internal/docs"
 func FieldSpec() docs.FieldSpec {
 	return docs.FieldSpec{
 		Name: "batching",
+		Type: docs.FieldTypeObject,
 		Description: `
 Allows you to configure a [batching policy](/docs/configuration/batching).`,
 		Examples: []interface{}{
@@ -25,25 +26,25 @@ Allows you to configure a [batching policy](/docs/configuration/batching).`,
 			},
 		},
 		Children: docs.FieldSpecs{
-			docs.FieldCommon(
+			docs.FieldInt(
 				"count",
 				"A number of messages at which the batch should be flushed. If `0` disables count based batching.",
 			),
-			docs.FieldCommon(
+			docs.FieldInt(
 				"byte_size",
 				"An amount of bytes at which the batch should be flushed. If `0` disables size based batching.",
 			).HasDefault(0),
-			docs.FieldCommon(
+			docs.FieldString(
 				"period",
 				"A period in which an incomplete batch should be flushed regardless of its size.",
 				"1s", "1m", "500ms",
 			).HasDefault(""),
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"check",
 				"A [Bloblang query](/docs/guides/bloblang/about/) that should return a boolean value indicating whether a message should end a batch.",
 				`this.type == "end_of_transaction"`,
-			).HasDefault("").Linter(docs.LintBloblangMapping),
-			docs.FieldDeprecated("condition").HasType(docs.FieldCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
+			).HasDefault(""),
+			docs.FieldDeprecated("condition").HasType(docs.FieldTypeCondition).OmitWhen(func(v, _ interface{}) (string, bool) {
 				m, ok := v.(map[string]interface{})
 				if !ok {
 					return "", false
@@ -72,7 +73,7 @@ Allows you to configure a [batching policy](/docs/configuration/batching).`,
 						"merge_json": struct{}{},
 					},
 				},
-			).Array().HasType(docs.FieldProcessor),
+			).Array().HasType(docs.FieldTypeProcessor).Optional(),
 		},
 	}
 }

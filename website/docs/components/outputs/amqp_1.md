@@ -15,7 +15,9 @@ categories: ["Services"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-BETA: This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::caution BETA
+This component is mostly stable but breaking changes could still be made outside of major version releases if a fundamental problem with the component is found.
+:::
 
 Sends messages to an AMQP (1.0) server.
 
@@ -35,6 +37,8 @@ output:
     url: ""
     target_address: ""
     max_in_flight: 1
+    metadata:
+      exclude_prefixes: []
 ```
 
 </TabItem>
@@ -52,17 +56,23 @@ output:
       enabled: false
       skip_cert_verify: false
       enable_renegotiation: false
+      root_cas: ""
       root_cas_file: ""
       client_certs: []
     sasl:
       mechanism: none
       user: ""
       password: ""
+    metadata:
+      exclude_prefixes: []
 ```
 
 </TabItem>
 </Tabs>
 
+### Metadata
+
+Message metadata is added to each AMQP message as string annotations. In order to control which metadata keys are added use the `metadata` config field.
 
 ## Performance
 
@@ -146,6 +156,23 @@ Type: `bool`
 Default: `false`  
 Requires version 3.45.0 or newer  
 
+### `tls.root_cas`
+
+An optional root certificate authority to use. This is a string, representing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
+
+
+Type: `string`  
+Default: `""`  
+
+```yaml
+# Examples
+
+root_cas: |-
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+```
+
 ### `tls.root_cas_file`
 
 An optional path of a root certificate authority file to use. This is a file, often with a .pem extension, containing a certificate chain from the parent trusted root certificate, to possible intermediate signing certificates, to the host certificate.
@@ -166,6 +193,7 @@ A list of client certificates to use. For each certificate either the fields `ce
 
 
 Type: `array`  
+Default: `[]`  
 
 ```yaml
 # Examples
@@ -259,5 +287,20 @@ Default: `""`
 
 password: ${PASSWORD}
 ```
+
+### `metadata`
+
+Specify criteria for which metadata values are attached to messages as headers.
+
+
+Type: `object`  
+
+### `metadata.exclude_prefixes`
+
+Provide a list of explicit metadata key prefixes to be excluded when adding metadata to sent messages.
+
+
+Type: `array`  
+Default: `[]`  
 
 

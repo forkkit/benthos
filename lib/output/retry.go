@@ -10,6 +10,7 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/component/output"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/response"
@@ -38,9 +39,9 @@ we want to avoid reapplying to the same message more than once in the pipeline.
 
 Rather than retrying the same output you may wish to retry the send using a
 different output target (a dead letter queue). In which case you should instead
-use the ` + "[`try`](/docs/components/outputs/try)" + ` output type.`,
+use the ` + "[`fallback`](/docs/components/outputs/fallback)" + ` output type.`,
 		FieldSpecs: retries.FieldSpecs().Add(
-			docs.FieldCommon("output", "A child output.").HasType(docs.FieldOutput),
+			docs.FieldCommon("output", "A child output.").HasType(docs.FieldTypeOutput),
 		),
 		Categories: []Category{
 			CategoryUtility,
@@ -176,9 +177,7 @@ func (r *Retry) loop() {
 		wg.Wait()
 		close(r.transactionsOut)
 		r.wrapped.CloseAsync()
-		err := r.wrapped.WaitForClose(time.Second)
-		for ; err != nil; err = r.wrapped.WaitForClose(time.Second) {
-		}
+		_ = r.wrapped.WaitForClose(shutdown.MaximumShutdownWait())
 		mRunning.Decr(1)
 		close(r.closedChan)
 	}()

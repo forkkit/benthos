@@ -23,7 +23,7 @@ func TestAssignments(t *testing.T) {
 
 	initFunc := func(name string, args ...interface{}) query.Function {
 		t.Helper()
-		fn, err := query.InitFunction(name, args...)
+		fn, err := query.InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -50,6 +50,26 @@ func TestAssignments(t *testing.T) {
 			),
 			input:  []part{{Content: `{"bar":"test1","zed":"gone"}`}},
 			output: &part{Content: `bar`},
+		},
+		"append array at root": {
+			mapping: NewExecutor("", nil, nil,
+				NewStatement(nil, NewJSONAssignment(), query.NewLiteralFunction("", []interface{}{})),
+				NewStatement(nil, NewJSONAssignment("-"), query.NewLiteralFunction("", "foo")),
+				NewStatement(nil, NewJSONAssignment("-"), query.NewLiteralFunction("", "bar")),
+				NewStatement(nil, NewJSONAssignment("-"), query.NewLiteralFunction("", "baz")),
+			),
+			input:  []part{{Content: `[]`}},
+			output: &part{Content: `["foo","bar","baz"]`},
+		},
+		"append array at root nested": {
+			mapping: NewExecutor("", nil, nil,
+				NewStatement(nil, NewJSONAssignment(), query.NewLiteralFunction("", []interface{}{})),
+				NewStatement(nil, NewJSONAssignment("-", "A"), query.NewLiteralFunction("", "foo")),
+				NewStatement(nil, NewJSONAssignment("-", "B"), query.NewLiteralFunction("", "bar")),
+				NewStatement(nil, NewJSONAssignment("-", "C"), query.NewLiteralFunction("", "baz")),
+			),
+			input:  []part{{Content: `{}`}},
+			output: &part{Content: `[{"A":"foo"},{"B":"bar"},{"C":"baz"}]`},
 		},
 		"delete root": {
 			mapping: NewExecutor("", nil, nil,
@@ -260,7 +280,7 @@ func TestAssignments(t *testing.T) {
 func TestTargets(t *testing.T) {
 	function := func(name string, args ...interface{}) query.Function {
 		t.Helper()
-		fn, err := query.InitFunction(name, args...)
+		fn, err := query.InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -327,7 +347,7 @@ func TestExec(t *testing.T) {
 
 	function := func(name string, args ...interface{}) query.Function {
 		t.Helper()
-		fn, err := query.InitFunction(name, args...)
+		fn, err := query.InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}
@@ -440,7 +460,7 @@ func TestQueries(t *testing.T) {
 
 	initFunc := func(name string, args ...interface{}) query.Function {
 		t.Helper()
-		fn, err := query.InitFunction(name, args...)
+		fn, err := query.InitFunctionHelper(name, args...)
 		require.NoError(t, err)
 		return fn
 	}

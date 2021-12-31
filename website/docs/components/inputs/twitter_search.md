@@ -2,7 +2,7 @@
 title: twitter_search
 type: input
 status: experimental
-categories: ["Services"]
+categories: ["Services","Social"]
 ---
 
 <!--
@@ -15,8 +15,9 @@ categories: ["Services"]
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-EXPERIMENTAL: This component is experimental and therefore subject to change or removal outside of major version releases.
-
+:::caution EXPERIMENTAL
+This component is experimental and therefore subject to change or removal outside of major version releases.
+:::
 Consumes tweets matching a given search using the Twitter recent search V2 API.
 
 
@@ -54,6 +55,7 @@ input:
     poll_period: 1m
     backfill_period: 5m
     cache: ""
+    cache_key: last_tweet_id
     rate_limit: ""
     api_key: ""
     api_secret: ""
@@ -110,6 +112,14 @@ A cache resource to use for request pagination.
 
 
 Type: `string`  
+
+### `cache_key`
+
+The key identifier used when storing the ID of the last tweet received.
+
+
+Type: `string`  
+Default: `"last_tweet_id"`  
 
 ### `rate_limit`
 

@@ -1,7 +1,6 @@
 package input
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/Jeffail/benthos/v3/internal/docs"
 	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/shutdown"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/message"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
@@ -154,7 +154,7 @@ Each message must be structured (JSON or otherwise processed into a structured f
 					"The chosen strategy to use when a data join would otherwise result in a collision of field values. The strategy `array` means non-array colliding values are placed into an array and colliding arrays are merged. The strategy `replace` replaces old values with new values. The strategy `keep` keeps the old value.",
 				).HasOptions("array", "replace", "keep"),
 			).AtVersion("3.40.0"),
-			docs.FieldCommon("inputs", "An array of inputs to read from sequentially.").Array().HasType(docs.FieldInput),
+			docs.FieldCommon("inputs", "An array of inputs to read from sequentially.").Array().HasType(docs.FieldTypeInput),
 		},
 		Categories: []Category{
 			CategoryUtility,
@@ -393,9 +393,7 @@ type Sequence struct {
 
 	transactions chan types.Transaction
 
-	ctx        context.Context
-	closeFn    func()
-	closedChan chan struct{}
+	shutSig *shutdown.Signaller
 }
 
 type sequenceTarget struct {
@@ -435,9 +433,8 @@ func NewSequence(
 		log:          rLog,
 		stats:        rStats,
 		transactions: make(chan types.Transaction),
-		closedChan:   make(chan struct{}),
+		shutSig:      shutdown.NewSignaller(),
 	}
-	rdr.ctx, rdr.closeFn = context.WithCancel(context.Background())
 
 	var err error
 	if rdr.joiner, err = rdr.conf.ShardedJoin.validate(); err != nil {
@@ -505,7 +502,7 @@ func (r *Sequence) dispatchJoinedMessage(wg *sync.WaitGroup, msg types.Message) 
 	tran := types.NewTransaction(msg, resChan)
 	select {
 	case r.transactions <- tran:
-	case <-r.ctx.Done():
+	case <-r.shutSig.CloseNowChan():
 		return
 	}
 	wg.Add(1)
@@ -518,17 +515,17 @@ func (r *Sequence) dispatchJoinedMessage(wg *sync.WaitGroup, msg types.Message) 
 					return
 				}
 				r.log.Errorf("Failed to send joined message: %v\n", res.Error())
-			case <-r.ctx.Done():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 			select {
 			case <-time.After(time.Second):
-			case <-r.ctx.Done():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 			select {
 			case r.transactions <- tran:
-			case <-r.ctx.Done():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 		}
@@ -541,12 +538,17 @@ func (r *Sequence) loop() {
 		shardJoinWG.Wait()
 		if t, _ := r.getTarget(); t != nil {
 			t.CloseAsync()
-			err := t.WaitForClose(time.Second)
-			for ; err != nil; err = t.WaitForClose(time.Second) {
-			}
+			go func() {
+				select {
+				case <-r.shutSig.CloseNowChan():
+					_ = t.WaitForClose(0)
+				case <-r.shutSig.HasClosedChan():
+				}
+			}()
+			_ = t.WaitForClose(shutdown.MaximumShutdownWait())
 		}
 		close(r.transactions)
-		close(r.closedChan)
+		r.shutSig.ShutdownComplete()
 	}()
 
 	target, finalInSequence := r.getTarget()
@@ -559,7 +561,7 @@ runLoop:
 				r.log.Errorf("Unable to start next sequence: %v\n", err)
 				select {
 				case <-time.After(time.Second):
-				case <-r.ctx.Done():
+				case <-r.shutSig.CloseAtLeisureChan():
 					return
 				}
 				continue runLoop
@@ -598,7 +600,7 @@ runLoop:
 				target = nil
 				continue runLoop
 			}
-		case <-r.ctx.Done():
+		case <-r.shutSig.CloseAtLeisureChan():
 			return
 		}
 
@@ -608,13 +610,13 @@ runLoop:
 			})
 			select {
 			case tran.ResponseChan <- response.NewAck():
-			case <-r.ctx.Done():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 		} else {
 			select {
 			case r.transactions <- tran:
-			case <-r.ctx.Done():
+			case <-r.shutSig.CloseNowChan():
 				return
 			}
 		}
@@ -638,13 +640,19 @@ func (r *Sequence) Connected() bool {
 
 // CloseAsync shuts down the Sequence input and stops processing requests.
 func (r *Sequence) CloseAsync() {
-	r.closeFn()
+	r.shutSig.CloseAtLeisure()
 }
 
 // WaitForClose blocks until the Sequence input has closed down.
 func (r *Sequence) WaitForClose(timeout time.Duration) error {
+	go func() {
+		if tAfter := timeout - time.Second; tAfter > 0 {
+			<-time.After(timeout - time.Second)
+		}
+		r.shutSig.CloseNow()
+	}()
 	select {
-	case <-r.closedChan:
+	case <-r.shutSig.HasClosedChan():
 	case <-time.After(timeout):
 		return types.ErrTimeout
 	}

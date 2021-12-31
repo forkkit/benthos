@@ -4,20 +4,22 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Jeffail/benthos/v3/internal/bloblang"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/field"
 	"github.com/Jeffail/benthos/v3/internal/bloblang/mapping"
 	"github.com/Jeffail/benthos/v3/internal/docs"
+	"github.com/Jeffail/benthos/v3/internal/interop"
+	"github.com/Jeffail/benthos/v3/internal/tracing"
 	"github.com/Jeffail/benthos/v3/lib/log"
 	"github.com/Jeffail/benthos/v3/lib/metrics"
 	"github.com/Jeffail/benthos/v3/lib/types"
-	"github.com/opentracing/opentracing-go"
 
 	// SQL Drivers
 	_ "github.com/ClickHouse/clickhouse-go"
+	_ "github.com/denisenkom/go-mssqldb"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -47,6 +49,7 @@ The following is a list of supported drivers and their respective DSN formats:
 ` + "| `clickhouse` | [`tcp://[netloc][:port][?param1=value1&...&paramN=valueN]`](https://github.com/ClickHouse/clickhouse-go#dsn)" + `
 ` + "| `mysql` | `[username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]` |" + `
 ` + "| `postgres` | `postgres://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]` |" + `
+` + "| `mssql` | `sqlserver://[user[:password]@][netloc][:port][?database=dbname&param1=value1&...]` |" + `
 
 Please note that the ` + "`postgres`" + ` driver enforces SSL by default, you
 can override this with the parameter ` + "`sslmode=disable`" + ` if required.`,
@@ -93,7 +96,7 @@ pipeline:
 			docs.FieldCommon(
 				"driver",
 				"A database [driver](#drivers) to use.",
-			).HasOptions("mysql", "postgres", "clickhouse"),
+			).HasOptions("mysql", "postgres", "clickhouse", "mssql"),
 			docs.FieldCommon(
 				"data_source_name", "A Data Source Name to identify the target database.",
 				"tcp://host1:9000?username=user&password=qwerty&database=clicks&read_timeout=10&write_timeout=20&alt_hosts=host2:9000,host3:9000",
@@ -105,16 +108,20 @@ pipeline:
 				"query", "The query to run against the database.",
 				"INSERT INTO footable (foo, bar, baz) VALUES (?, ?, ?);",
 			),
+			docs.FieldBool(
+				"unsafe_dynamic_query",
+				"Whether to enable dynamic queries that support interpolation functions. WARNING: This feature opens up the possibility of SQL injection attacks and is considered unsafe.",
+			).Advanced().HasDefault(false),
 			docs.FieldDeprecated(
 				"args",
 				"A list of arguments for the query to be resolved for each message.",
 			).IsInterpolated().Array(),
-			docs.FieldCommon(
+			docs.FieldBloblang(
 				"args_mapping",
 				"A [Bloblang mapping](/docs/guides/bloblang/about) that produces the arguments for the query. The mapping must return an array containing the number of arguments in the query.",
 				`[ this.foo, this.bar.not_empty().catch(null), meta("baz") ]`,
 				`root = [ uuid_v4() ].merge(this.document.args)`,
-			).HasType(docs.FieldString).Linter(docs.LintBloblangMapping).AtVersion("3.47.0"),
+			).AtVersion("3.47.0"),
 			docs.FieldCommon(
 				"result_codec",
 				"A [codec](#result-codecs) to determine how resulting rows are converted into messages.",
@@ -143,31 +150,35 @@ columns value in the row.`,
 
 // SQLConfig contains configuration fields for the SQL processor.
 type SQLConfig struct {
-	Driver         string   `json:"driver" yaml:"driver"`
-	DataSourceName string   `json:"data_source_name" yaml:"data_source_name"`
-	DSN            string   `json:"dsn" yaml:"dsn"`
-	Query          string   `json:"query" yaml:"query"`
-	Args           []string `json:"args" yaml:"args"`
-	ArgsMapping    string   `json:"args_mapping" yaml:"args_mapping"`
-	ResultCodec    string   `json:"result_codec" yaml:"result_codec"`
+	Driver             string   `json:"driver" yaml:"driver"`
+	DataSourceName     string   `json:"data_source_name" yaml:"data_source_name"`
+	DSN                string   `json:"dsn" yaml:"dsn"`
+	Query              string   `json:"query" yaml:"query"`
+	UnsafeDynamicQuery bool     `json:"unsafe_dynamic_query" yaml:"unsafe_dynamic_query"`
+	Args               []string `json:"args" yaml:"args"`
+	ArgsMapping        string   `json:"args_mapping" yaml:"args_mapping"`
+	ResultCodec        string   `json:"result_codec" yaml:"result_codec"`
 }
 
 // NewSQLConfig returns a SQLConfig with default values.
 func NewSQLConfig() SQLConfig {
 	return SQLConfig{
-		Driver:         "mysql",
-		DataSourceName: "",
-		DSN:            "",
-		Query:          "",
-		Args:           []string{},
-		ArgsMapping:    "",
-		ResultCodec:    "none",
+		Driver:             "mysql",
+		DataSourceName:     "",
+		DSN:                "",
+		Query:              "",
+		UnsafeDynamicQuery: false,
+		Args:               []string{},
+		ArgsMapping:        "",
+		ResultCodec:        "none",
 	}
 }
 
 //------------------------------------------------------------------------------
 
-func insertOnlyBatchDriver(driver string) bool {
+// Some SQL drivers (such as clickhouse) require prepared inserts to be local to
+// a transaction, rather than general.
+func insertRequiresTransactionPrepare(driver string) bool {
 	_, exists := map[string]struct{}{
 		"clickhouse": {},
 	}[driver]
@@ -192,7 +203,9 @@ type SQL struct {
 	deprecated         bool
 	resCodecDeprecated sqlResultCodecDeprecated
 
-	query *sql.Stmt
+	queryStr string
+	dynQuery *field.Expression
+	query    *sql.Stmt
 
 	closeChan  chan struct{}
 	closedChan chan struct{}
@@ -227,19 +240,27 @@ func NewSQL(
 		if deprecated {
 			return nil, errors.New("the field `args_mapping` cannot be used when running the `sql` processor in deprecated mode (using the `dsn` field), use the `data_source_name` field instead")
 		}
+		log.Warnln("using unsafe_dynamic_query leaves you vulnerable to SQL injection attacks")
 		var err error
-		if argsMapping, err = bloblang.NewMapping("", conf.SQL.ArgsMapping); err != nil {
+		if argsMapping, err = interop.NewBloblangMapping(mgr, conf.SQL.ArgsMapping); err != nil {
 			return nil, fmt.Errorf("failed to parse `args_mapping`: %w", err)
 		}
 	}
 
 	var args []*field.Expression
 	for i, v := range conf.SQL.Args {
-		expr, err := bloblang.NewField(v)
+		expr, err := interop.NewBloblangField(mgr, v)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse arg %v expression: %v", i, err)
 		}
 		args = append(args, expr)
+	}
+
+	if conf.SQL.Driver == "mssql" {
+		// For MSSQL, if the user part of the connection string is in the
+		// `DOMAIN\username` format, then the backslash character needs to be
+		// URL-encoded.
+		conf.SQL.DataSourceName = strings.ReplaceAll(conf.SQL.DataSourceName, `\`, "%5C")
 	}
 
 	s := &SQL{
@@ -248,19 +269,22 @@ func NewSQL(
 		conf:        conf.SQL,
 		args:        args,
 		argsMapping: argsMapping,
-		deprecated:  deprecated,
-		closeChan:   make(chan struct{}),
-		closedChan:  make(chan struct{}),
-		mCount:      stats.GetCounter("count"),
-		mErr:        stats.GetCounter("error"),
-		mSent:       stats.GetCounter("sent"),
-		mBatchSent:  stats.GetCounter("batch.sent"),
+
+		queryStr: conf.SQL.Query,
+
+		deprecated: deprecated,
+		closeChan:  make(chan struct{}),
+		closedChan: make(chan struct{}),
+		mCount:     stats.GetCounter("count"),
+		mErr:       stats.GetCounter("error"),
+		mSent:      stats.GetCounter("sent"),
+		mBatchSent: stats.GetCounter("batch.sent"),
 	}
 
 	var err error
 	if deprecated {
 		s.log.Warnln("Using deprecated SQL functionality due to use of field 'dsn'. To switch to the new processor use the field 'data_source_name' instead. The new processor is not backwards compatible due to differences in how message batches are processed. For more information check out the docs at https://www.benthos.dev/docs/components/processors/sql.")
-		if conf.SQL.Driver != "mysql" && conf.SQL.Driver != "postgres" {
+		if conf.SQL.Driver != "mysql" && conf.SQL.Driver != "postgres" && conf.SQL.Driver != "mssql" {
 			return nil, fmt.Errorf("driver '%v' is not supported with deprecated SQL features (using field 'dsn')", conf.SQL.Driver)
 		}
 		if s.resCodecDeprecated, err = strToSQLResultCodecDeprecated(conf.SQL.ResultCodec); err != nil {
@@ -274,9 +298,20 @@ func NewSQL(
 		return nil, err
 	}
 
+	if conf.SQL.UnsafeDynamicQuery {
+		if deprecated {
+			return nil, errors.New("cannot use dynamic queries when running in deprecated mode")
+		}
+		if s.dynQuery, err = interop.NewBloblangField(mgr, s.queryStr); err != nil {
+			return nil, fmt.Errorf("failed to parse dynamic query expression: %v", err)
+		}
+	}
+
+	isSelectQuery := s.resCodecDeprecated != nil || s.resCodec != nil
+
 	// Some drivers only support transactional prepared inserts.
-	if s.resCodec != nil || s.resCodecDeprecated != nil || !insertOnlyBatchDriver(conf.SQL.Driver) {
-		if s.query, err = s.db.Prepare(conf.SQL.Query); err != nil {
+	if s.dynQuery == nil && (isSelectQuery || !insertRequiresTransactionPrepare(conf.SQL.Driver)) {
+		if s.query, err = s.db.Prepare(s.queryStr); err != nil {
 			s.db.Close()
 			return nil, fmt.Errorf("failed to prepare query: %v", err)
 		}
@@ -375,7 +410,7 @@ func (s *SQL) doExecute(argSets [][]interface{}) (errs []error) {
 
 	stmt := s.query
 	if stmt == nil {
-		if stmt, err = tx.Prepare(s.conf.Query); err != nil {
+		if stmt, err = tx.Prepare(s.queryStr); err != nil {
 			return
 		}
 		defer stmt.Close()
@@ -441,7 +476,7 @@ func (s *SQL) ProcessMessage(msg types.Message) ([]types.Message, types.Response
 	s.mCount.Incr(1)
 	newMsg := msg.Copy()
 
-	if s.resCodec == nil {
+	if s.resCodec == nil && s.dynQuery == nil {
 		argSets := make([][]interface{}, newMsg.Len())
 		newMsg.Iter(func(index int, p types.Part) error {
 			args, err := s.getArgs(index, msg)
@@ -463,14 +498,34 @@ func (s *SQL) ProcessMessage(msg types.Message) ([]types.Message, types.Response
 			}
 		}
 	} else {
-		IteratePartsWithSpan(TypeSQL, nil, newMsg, func(index int, span opentracing.Span, part types.Part) error {
+		IteratePartsWithSpanV2(TypeSQL, nil, newMsg, func(index int, span *tracing.Span, part types.Part) error {
 			args, err := s.getArgs(index, msg)
 			if err != nil {
 				s.mErr.Incr(1)
 				s.log.Errorf("Args mapping error: %v\n", err)
 				return err
 			}
-			rows, err := s.query.Query(args...)
+
+			if s.resCodec == nil {
+				if s.dynQuery != nil {
+					queryStr := s.dynQuery.String(index, msg)
+					_, err = s.db.Exec(queryStr, args...)
+				} else {
+					_, err = s.query.Exec(args...)
+				}
+				if err != nil {
+					return fmt.Errorf("failed to execute query: %w", err)
+				}
+				return nil
+			}
+
+			var rows *sql.Rows
+			if s.dynQuery != nil {
+				queryStr := s.dynQuery.String(index, msg)
+				rows, err = s.db.Query(queryStr, args...)
+			} else {
+				rows, err = s.query.Query(args...)
+			}
 			if err == nil {
 				defer rows.Close()
 				if err = s.resCodec(rows, part); err != nil {

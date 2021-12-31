@@ -1,8 +1,10 @@
 package input
 
 import (
-	"io/ioutil"
+	"context"
+	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -16,7 +18,7 @@ import (
 )
 
 func TestFileSinglePartDeprecated(t *testing.T) {
-	tmpfile, err := ioutil.TempFile("", "benthos_file_test")
+	tmpfile, err := os.CreateTemp("", "benthos_file_test")
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -30,9 +32,9 @@ func TestFileSinglePartDeprecated(t *testing.T) {
 	}
 
 	for _, msg := range messages {
-		tmpfile.Write([]byte(msg))
-		tmpfile.Write([]byte("\n"))
-		tmpfile.Write([]byte("\n")) // Try some empty messages
+		_, _ = tmpfile.WriteString(msg)
+		_, _ = tmpfile.WriteString("\n")
+		_, _ = tmpfile.WriteString("\n") // Try some empty messages
 	}
 
 	conf := NewConfig()
@@ -73,7 +75,7 @@ func TestFileSinglePartDeprecated(t *testing.T) {
 }
 
 func TestFileMultiPartDeprecated(t *testing.T) {
-	tmpfile, err := ioutil.TempFile("", "benthos_file_test")
+	tmpfile, err := os.CreateTemp("", "benthos_file_test")
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -100,10 +102,10 @@ func TestFileMultiPartDeprecated(t *testing.T) {
 
 	for _, msg := range messages {
 		for _, part := range msg {
-			tmpfile.Write([]byte(part))
-			tmpfile.Write([]byte("\n"))
+			_, _ = tmpfile.WriteString(part)
+			_, _ = tmpfile.WriteString("\n")
 		}
-		tmpfile.Write([]byte("\n"))
+		_, _ = tmpfile.WriteString("\n")
 	}
 
 	conf := NewConfig()
@@ -142,5 +144,81 @@ func TestFileMultiPartDeprecated(t *testing.T) {
 		require.False(t, open)
 	case <-time.After(time.Second):
 		t.Error("Timed out waiting for channel close")
+	}
+}
+
+func TestFileDirectory(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "benthos_file_input_test")
+	require.NoError(t, err)
+
+	tmpInnerDir, err := os.MkdirTemp(tmpDir, "benthos_inner")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	tmpFile, err := os.CreateTemp(tmpDir, "f1*.txt")
+	require.NoError(t, err)
+
+	_, err = tmpFile.WriteString("foo")
+	require.NoError(t, err)
+
+	err = tmpFile.Close()
+	require.NoError(t, err)
+
+	tmpFileTwo, err := os.CreateTemp(tmpInnerDir, "f2*.txt")
+	require.NoError(t, err)
+
+	_, err = tmpFileTwo.WriteString("bar")
+	require.NoError(t, err)
+
+	err = tmpFileTwo.Close()
+	require.NoError(t, err)
+
+	exp := map[string]struct{}{
+		"foo": {},
+		"bar": {},
+	}
+	act := map[string]struct{}{}
+
+	conf := NewFileConfig()
+	conf.Paths = []string{
+		fmt.Sprintf("%v/*.txt", tmpDir),
+		fmt.Sprintf("%v/**/*.txt", tmpDir),
+	}
+	conf.Codec = "all-bytes"
+
+	f, err := newFileConsumer(conf, log.Noop())
+	require.NoError(t, err)
+
+	err = f.ConnectWithContext(context.Background())
+	require.NoError(t, err)
+
+	msg, aFn, err := f.ReadWithContext(context.Background())
+	require.NoError(t, err)
+
+	resStr := string(msg.Get(0).Get())
+	if _, exists := act[resStr]; exists {
+		t.Errorf("Received duplicate message: %v", resStr)
+	}
+	act[resStr] = struct{}{}
+	require.NoError(t, aFn(context.Background(), response.NewAck()))
+
+	msg, aFn, err = f.ReadWithContext(context.Background())
+	require.NoError(t, err)
+
+	resStr = string(msg.Get(0).Get())
+	if _, exists := act[resStr]; exists {
+		t.Errorf("Received duplicate message: %v", resStr)
+	}
+	act[resStr] = struct{}{}
+	require.NoError(t, aFn(context.Background(), response.NewAck()))
+
+	_, _, err = f.ReadWithContext(context.Background())
+	assert.Equal(t, types.ErrTypeClosed, err)
+
+	if !reflect.DeepEqual(exp, act) {
+		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 }
